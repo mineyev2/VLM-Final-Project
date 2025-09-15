@@ -18,3 +18,4 @@ env/
 
 # Project specific
 gpt_results/
+datasets/
