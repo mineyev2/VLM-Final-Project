@@ -17,7 +17,8 @@ from scipy.integrate import cumulative_trapezoid
 import json
 from openemma.YOLO3D.inference import yolo3d_nuScenes
 from utils import EstimateCurvatureFromTrajectory, IntegrateCurvatureForPoints, OverlayTrajectory, WriteImageSequenceToVideo
-from transformers import MllamaForConditionalGeneration, AutoProcessor, Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration, AutoTokenizer
+from transformers import MllamaForConditionalGeneration, AutoProcessor, Qwen2VLForConditionalGeneration, AutoTokenizer
+# from transformers import Qwen2_5_VLForConditionalGeneration
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from llava.model.builder import load_pretrained_model
@@ -256,20 +257,19 @@ if __name__ == '__main__':
     try:
         # 优先本地加载Qwen2.5-VL-3B-Instruct，并优选flash attention
         if "qwen" in args.model_path or "Qwen" in args.model_path:
+            # try:
+            #     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            #         "/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct",
+            #         torch_dtype=torch.bfloat16,
+            #         attn_implementation="flash_attention_2",
+            #         device_map="auto"
+            #     )
+            #     processor = AutoProcessor.from_pretrained("/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct")
+            #     tokenizer = None
+            #     qwen25_loaded = True
+            #     print("已本地加载 Qwen2.5-VL-3B-Instruct 并启用 flash attention。")
             try:
-                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                    "/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct",
-                    torch_dtype=torch.bfloat16,
-                    attn_implementation="flash_attention_2",
-                    device_map="auto"
-                )
-                processor = AutoProcessor.from_pretrained("/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct")
-                tokenizer = None
-                qwen25_loaded = True
-                print("已本地加载 Qwen2.5-VL-3B-Instruct 并启用 flash attention。")
-            except Exception as e:
                 print("Qwen2.5-VL-3B-Instruct 加载失败，尝试加载 Qwen2-VL-7B-Instruct。")
-                print(e)
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
                     "Qwen/Qwen2-VL-7B-Instruct",
                     torch_dtype=torch.bfloat16,
@@ -279,6 +279,8 @@ if __name__ == '__main__':
                 tokenizer = None
                 qwen25_loaded = False
                 print("已加载 Qwen2-VL-7B-Instruct。")
+            except Exception as e:
+                print("Exception: ", e)
         else:
             if "llava" == args.model_path:    
                 disable_torch_init()
