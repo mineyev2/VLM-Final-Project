@@ -1,5 +1,6 @@
 import base64
 import os.path
+import gc
 import re
 import argparse
 from datetime import datetime
@@ -250,6 +251,14 @@ if __name__ == '__main__':
 
     print(f"{args.model_path}")
 
+    # Clear GPU memory before loading
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GiB total")
+        print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GiB")
+
+
     model = None
     processor = None
     tokenizer = None
@@ -269,16 +278,16 @@ if __name__ == '__main__':
             #     qwen25_loaded = True
             #     print("已本地加载 Qwen2.5-VL-3B-Instruct 并启用 flash attention。")
             try:
-                print("Qwen2.5-VL-3B-Instruct 加载失败，尝试加载 Qwen2-VL-7B-Instruct。")
+                print("Trying Qwen2-VL-2B-Instruct (smaller model)...") # TODO: Use bigger model for PACE
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
-                    "Qwen/Qwen2-VL-7B-Instruct",
+                    "Qwen/Qwen2-VL-2B-Instruct",
                     torch_dtype=torch.bfloat16,
                     device_map="auto"
                 )
-                processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+                processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
                 tokenizer = None
                 qwen25_loaded = False
-                print("已加载 Qwen2-VL-7B-Instruct。")
+                print("已加载 Qwen2-VL-2B-Instruct。")
             except Exception as e:
                 print("Exception: ", e)
         else:
