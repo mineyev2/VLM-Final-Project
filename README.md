@@ -28,13 +28,18 @@ NOTE: When setting up Global Connect Personal Setup, do NOT select "High Assuran
 ## OpenEMMA Installation
 (Original repo: https://github.com/taco-group/OpenEMMA/tree/main)
 
-### 1) Setup Virtual Environment
+### 1) Clone repo
+
+1) **IMPORTANT**: Navigate to the `scratch` directory first!
+2) Clone repo in the `scratch` directory
+
+### 2) Setup Virtual Environment
 ```
 conda create -n openemma python=3.8
 conda activate openemma
 ```
 
-### 2) Install Dependencies
+### 3) Install Dependencies
 ```
 cd <repo-folder>
 conda install nvidia/label/cuda-12.4.0::cuda-toolkit
@@ -42,17 +47,15 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-### 3) Download Dataset
-Folder should look like this (TODO: Check this, I just copied from nuscenes-devkit for now)
-```
-./datasets/NuScenes
-    samples	-	Sensor data for keyframes (annotated images).
-    sweeps  -   Sensor data for intermediate frames (unannotated images).
-    v1.0-*	-	JSON tables that include all the meta data and annotations. Each split (train, val, test, mini) is provided in a separate folder.
-```
+### 4) Download Dataset
 
-### 4) Running Script
+1) Visit nuScenes and make an account: https://www.nuscenes.org/nuscenes#download
+2) Navigate to Full Dataset v1.0 > Mini > US and download
+3) Upload the downloaded `dataset` folder to repo root folder (`<HOME_DIR>/scratch/VLM-Final-Project/`) using Globus (instructions are described above)
 
+**TODO (Roman)**: Update to use the whole dataset instead of just mini
+
+### 5) Running the Code
 #### Update HuggingFace Directory
 Add the following line to the end of your `~/.bashrc` file (for model/datasets to be stored in scratch instead of local storage):
 ```
@@ -65,7 +68,7 @@ cd <SCRATCH_DIR>
 mkdir -p .cache/huggingface/hub
 ```
 
-#### Execution Script
+#### Running the Script
 ```
 python main.py \
     --model-path [model] \
