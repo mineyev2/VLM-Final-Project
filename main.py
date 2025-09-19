@@ -242,7 +242,7 @@ def GenerateMotion(obs_images, obs_waypoints, obs_velocities, obs_curvatures, gi
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="gpt")
+    parser.add_argument("--model-path", type=str, default="qwen")
     parser.add_argument("--plot", type=bool, default=True)
     parser.add_argument("--dataroot", type=str, default='datasets/NuScenes')
     parser.add_argument("--version", type=str, default='v1.0-mini')
@@ -278,16 +278,16 @@ if __name__ == '__main__':
             #     qwen25_loaded = True
             #     print("已本地加载 Qwen2.5-VL-3B-Instruct 并启用 flash attention。")
             try:
-                print("Trying Qwen2-VL-2B-Instruct (smaller model)...") # TODO: Use bigger model for PACE
+                print("Trying Qwen2-VL-7B-Instruct...") # TODO: Use bigger model for PACE
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
-                    "Qwen/Qwen2-VL-2B-Instruct",
+                    "Qwen/Qwen2-VL-7B-Instruct",
                     torch_dtype=torch.bfloat16,
                     device_map="auto"
                 )
-                processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
+                processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
                 tokenizer = None
                 qwen25_loaded = False
-                print("已加载 Qwen2-VL-2B-Instruct。")
+                print("已加载 Qwen2-VL-7B-Instruct。")
             except Exception as e:
                 print("Exception: ", e)
         else:
