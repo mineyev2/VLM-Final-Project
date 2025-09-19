@@ -13,6 +13,7 @@ conda activate openemma
 ```
 cd <repo-folder>
 conda install nvidia/label/cuda-12.4.0::cuda-toolkit
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
