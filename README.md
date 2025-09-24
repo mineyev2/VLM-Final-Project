@@ -23,7 +23,13 @@ For big folders, I could only get Globus working. The tutorial is here: https://
 NOTE: When setting up Global Connect Personal Setup, do NOT select "High Assurance". You need a special certificate for that to work on the server side.
 
 ### 4) GPU Usage
-**TODO**
+I don't know specifics, but this gives me an H100:
+```
+salloc --gres=gpu:H100:1 --ntasks-per-node=1
+```
+Type `nvidia-smi` to check it loaded properly.
+
+More details are provided here: https://gatech.service-now.com/home?id=kb_article_view&sysparm_article=KB0042096
 
 ## OpenEMMA Installation
 (Original repo: https://github.com/taco-group/OpenEMMA/tree/main)
@@ -34,10 +40,30 @@ NOTE: When setting up Global Connect Personal Setup, do NOT select "High Assuran
 2) Clone repo in the `scratch` directory
 
 ### 2) Setup Virtual Environment
+#### Upload conda
+Download miniconda (I think it's not on the computer by default?)
+
+#### Configure Conda
+Conda uploads to local storage by default. We don't want this since setting up the OpenEMMA environment took up like 14GB for me even though we only have 300 GB.
+
+Update the package/environment folder locations to scratch as follows:
 ```
-conda create -n openemma python=3.8
+mkdir -p ~/scratch/miniconda/envs
+mkdir -p ~/scratch/miniconda/pkgs
+```
+```
+conda config --add envs_dirs ~/scratch/miniconda/envs
+conda config --add pkgs_dirs ~/scratch/miniconda/pkgs
+```
+
+#### Create the environment
+```
+conda create -n openemma python=3.10
 conda activate openemma
 ```
+
+(TODO: Finish 3.10 setup)
+
 
 ### 3) Install Dependencies
 ```
@@ -55,8 +81,7 @@ pip install -r requirements.txt
 
 **TODO (Roman)**: Update to use the whole dataset instead of just mini
 
-### 5) Running the Code
-#### Update HuggingFace Directory
+### 5) Update HuggingFace Directory
 Add the following line to the end of your `~/.bashrc` file (for model/datasets to be stored in scratch instead of local storage):
 ```
 export HF_HOME=<HOME_DIR>/scratch/.cache/huggingface
@@ -68,7 +93,12 @@ cd <SCRATCH_DIR>
 mkdir -p .cache/huggingface/hub
 ```
 
-#### Running the Script
+### 6) Running the Code
+
+#### Getting GPU Access
+[**(Click to go back to GPU Usage section)**](#4-gpu-usage)
+
+#### Run command:
 ```
 python main.py \
     --model-path [model] \
@@ -82,7 +112,5 @@ python main.py \
 - `--version`: Version of dataset (name you see in the zip file when you download. For me it's "v1.0-mini")
 
 
-### Things we could try to fix:
-- `pip install wrapt`
-- If we want to use QWEN2.5-VL need to upgrade python version to 3.10 or something
-    - transformers library not updated for new models for python 3.8
+### Resources
+- PACE-ICE Documentation: https://gatech.service-now.com/home?id=kb_article_view&sysparm_article=KB0042102
