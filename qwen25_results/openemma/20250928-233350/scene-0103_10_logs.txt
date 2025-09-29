@@ -1,0 +1,19 @@
+Scene Description: As an autonomous vehicle, I am currently driving through a city street lined with multi-story brick buildings on both sides. The road is relatively wide and appears to be a two-way street with no visible lane markings. There are several parked cars along the right side of the street, and a few vehicles are moving in the opposite direction.
+
+In the immediate vicinity, there are no visible traffic lights that would control the flow of traffic. However, the presence of parked cars suggests that the street may have designated parking areas, which could imply some level of traffic regulation. The vehicles ahead appear to be moving at a moderate speed, and there are no pedestrians
+Object Description: As an autonomous vehicle, when driving through this urban street scene, there are several road users that need to be monitored for safety:
+
+1. **Pedestrians**: 
+   - **Location**: On the sidewalks and near the crosswalks.
+   - **Description**: Pedestrians are walking along the sidewalks and crossing the street. They may be crossing at designated crosswalks or simply walking along the sidewalk.
+   - **Importance**: Pedestrians are vulnerable road users who can be unpredictable. Monitoring their movements helps ensure that the vehicle stops or slows down appropriately to avoid collisions.
+
+2. **Other Vehicles**:
+   - **
+Intent Description: Based on the lane markings and the movement of other cars in the image, your current intent remains unchanged. Here’s the reasoning:
+
+1. **Lane Markings**: The road clearly indicates two lanes for traffic traveling in the same direction. The ego car is in the right lane, and there are no visible lane changes or turn signals that indicate an intention to change lanes. The yellow center lines confirm that the right lane is the correct path for the ego car.
+
+2. **Movement of Other Cars**:
+   - The cars ahead are moving in the same direction as the ego car, and there is no indication of any vehicles directly in the
+Average Displacement Error: 4.879500657513665

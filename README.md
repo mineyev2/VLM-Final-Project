@@ -73,6 +73,8 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
+**TODO**: I'm testing CUDA 12.9 right now, having some issues with mismatched CUDA drivers
+
 ### 4) Download Dataset
 
 1) Visit nuScenes and make an account: https://www.nuscenes.org/nuscenes#download

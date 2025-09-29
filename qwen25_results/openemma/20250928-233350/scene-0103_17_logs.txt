@@ -1,0 +1,19 @@
+Scene Description: As an autonomous vehicle, I am currently driving down a city street with no visible traffic lights in the immediate vicinity. The road is marked with double yellow lines in the center, indicating that overtaking is not allowed in this direction. On both sides of the street, there are parked cars along the curbs, and some bicycles are secured to bike racks on the left side.
+
+There are no pedestrians visible in the image, but a person can be seen walking on the right sidewalk near the edge of the frame. The buildings on either side appear to be multi-story structures, likely residential or mixed-use, with windows facing outward. In the distance
+Object Description: As an autonomous vehicle, when driving through this urban street scene, there are several road users that need to be monitored for safety:
+
+1. **Pedestrians**: 
+   - **Location**: On the right side of the image near the sidewalk.
+   - **Description**: A pedestrian is walking along the sidewalk, carrying a backpack.
+   - **Importance**: Pedestrians can suddenly step into the road, especially if they are crossing or turning. It's crucial to maintain a safe distance and be prepared to stop if necessary.
+
+2. **Bicycles**:
+   - **Location**: On the left side of the image near
+Intent Description: Based on the lane markings and the movement of other cars in the image, your current intent remains unchanged. Here's the reasoning:
+
+1. **Lane Markings**: The road has clear double yellow center lines, which indicate that the right lane is the correct path for the ego car. There are no visible lane changes or turn signals that suggest an intention to change lanes.
+
+2. **Movement of Other Cars**:
+   - The cars ahead are moving in the same direction as the ego car, and there is no indication of any vehicles directly in the way that would require a lane change. The traffic flow appears smooth, with no signs of
+Average Displacement Error: 8.38390029875095

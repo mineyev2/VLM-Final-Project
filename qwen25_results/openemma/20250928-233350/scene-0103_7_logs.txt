@@ -1,0 +1,20 @@
+Scene Description: As an autonomous vehicle, I am currently driving through a city street with a clear view of the road ahead. Here's a description of the driving scene based on the provided images:
+
+1. **Traffic Lights**: There are no visible traffic lights in the immediate vicinity of the vehicle. The road appears to be a two-way street without any traffic signals.
+
+2. **Movements of Other Cars**: 
+   - A black car is parked on the left side of the street.
+   - A silver car is parked on the right side of the street.
+   - Several cars are parked along both sides of the street, indicating a moderate level of
+Object Description: As an autonomous vehicle, when analyzing the driving scene captured by the front-view camera, there are several road users that need to be monitored for safety and adherence to traffic rules. Here are two key road users to pay attention to:
+
+1. **Pedestrian near the crosswalk (Location: Left Side of the Image):**
+   - **Description:** There appears to be a pedestrian walking along the sidewalk on the left side of the street.
+   - **Importance:** Pedestrians can pose a significant risk if they step into the road unexpectedly, especially at intersections or crosswalks. Monitoring their movements helps ensure the vehicle stops or
+Intent Description: Based on the lane markings and the movement of other cars in the image, my current intent remains unchanged. Here's the reasoning:
+
+1. **Lane Markings**: The road clearly indicates two lanes for traffic traveling in the same direction. The ego car is in the right lane, and there are no visible lane changes or turn signals that indicate an intention to change lanes. The yellow center lines confirm that the right lane is the correct path for the ego car.
+
+2. **Movement of Other Cars**:
+   - The cars ahead are moving in the same direction as the ego car, and there is no indication of any vehicles directly in the
+Average Displacement Error: 12.969987304677801

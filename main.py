@@ -19,7 +19,7 @@ import json
 from openemma.YOLO3D.inference import yolo3d_nuScenes
 from utils import EstimateCurvatureFromTrajectory, IntegrateCurvatureForPoints, OverlayTrajectory, WriteImageSequenceToVideo
 from transformers import MllamaForConditionalGeneration, AutoProcessor, Qwen2VLForConditionalGeneration, AutoTokenizer
-# from transformers import Qwen2_5_VLForConditionalGeneration
+from transformers import Qwen2_5_VLForConditionalGeneration
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from llava.model.builder import load_pretrained_model
@@ -241,6 +241,11 @@ def GenerateMotion(obs_images, obs_waypoints, obs_velocities, obs_curvatures, gi
     return result, scene_description, object_description, intent_description
 
 if __name__ == '__main__':
+
+    if (not torch.cuda.is_available()):
+        print("CUDA is unavailable! Closing program")
+        quit()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="qwen")
     parser.add_argument("--plot", type=bool, default=True)
@@ -265,18 +270,23 @@ if __name__ == '__main__':
     qwen25_loaded = False
     try:
         # 优先本地加载Qwen2.5-VL-3B-Instruct，并优选flash attention
-        if "qwen" in args.model_path or "Qwen" in args.model_path:
-            # try:
-            #     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            #         "/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct",
-            #         torch_dtype=torch.bfloat16,
-            #         attn_implementation="flash_attention_2",
-            #         device_map="auto"
-            #     )
-            #     processor = AutoProcessor.from_pretrained("/root/OpenEMMA/models/Qwen2.5-VL-3B-Instruct")
-            #     tokenizer = None
-            #     qwen25_loaded = True
-            #     print("已本地加载 Qwen2.5-VL-3B-Instruct 并启用 flash attention。")
+        if "qwen25" in args.model_path:
+            try:
+                print("Loading Qwen2.5-VL-7B-Instruct")
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2.5-VL-7B-Instruct",
+                    dtype=torch.float16,
+                    device_map="auto"
+                    # attn_implementation="flash_attention_2" # <--- not sure what this means (Roman)
+                )
+                processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+                tokenizer = None
+                qwen25_loaded = True
+
+            except Exception as e:
+                print("Exception: ", e)
+
+        elif "qwen" in args.model_path or "Qwen" in args.model_path:
             try:
                 print("Trying Qwen2-VL-7B-Instruct...") # TODO: Use bigger model for PACE
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -305,6 +315,15 @@ if __name__ == '__main__':
                 tokenizer=None
     except Exception as e:
         print("模型加载出现异常：", e)
+
+    # Debug: Check if model and processor are loaded correctly
+    print(f"Model loaded: {model is not None}")
+    print(f"Processor loaded: {processor is not None}")
+    print(f"Tokenizer loaded: {tokenizer is not None}")
+    
+    if processor is None:
+        print("ERROR: Processor is None! Cannot proceed.")
+        exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     timestamp = args.model_path + f"_results/{args.method}/" + timestamp
@@ -532,61 +551,61 @@ if __name__ == '__main__':
         # break  # Scenes
 
 
-def vlm_inference(text=None, images=None, sys_message=None, processor=None, model=None, tokenizer=None, args=None):
-    if ("qwen" in args.model_path or "Qwen" in args.model_path):
-        # 判断是否为Qwen2.5-VL-3B-Instruct（新版）
-        if hasattr(model, "model_type") and getattr(model, "model_type", "") == "qwen2_5_vl":
-            # Qwen2.5-VL-3B-Instruct官方推荐推理方式
-            message = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": images},
-                        {"type": "text", "text": text}
-                    ]
-                }
-            ]
-            text_prompt = processor.apply_chat_template(
-                message, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs, video_inputs = process_vision_info(message)
-            inputs = processor(
-                text=[text_prompt],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(model.device)
-            generated_ids = model.generate(**inputs, max_new_tokens=128)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
-            return output_text[0]
-        else:
-            # 兼容Qwen2-VL-7B-Instruct等老模型
-            message = getMessage(text, image=images, args=args)
-            text_prompt = processor.apply_chat_template(
-                message, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs, video_inputs = process_vision_info(message)
-            inputs = processor(
-                text=[text_prompt],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            ).to(model.device)
-            generated_ids = model.generate(**inputs, max_new_tokens=128)
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
-            return output_text[0]
+# def vlm_inference(text=None, images=None, sys_message=None, processor=None, model=None, tokenizer=None, args=None):
+#     if ("qwen" in args.model_path or "Qwen" in args.model_path):
+#         # 判断是否为Qwen2.5-VL-3B-Instruct（新版）
+#         if hasattr(model, "model_type") and getattr(model, "model_type", "") == "qwen2_5_vl":
+#             # Qwen2.5-VL-3B-Instruct官方推荐推理方式
+#             message = [
+#                 {
+#                     "role": "user",
+#                     "content": [
+#                         {"type": "image", "image": images},
+#                         {"type": "text", "text": text}
+#                     ]
+#                 }
+#             ]
+#             text_prompt = processor.apply_chat_template(
+#                 message, tokenize=False, add_generation_prompt=True
+#             )
+#             image_inputs, video_inputs = process_vision_info(message)
+#             inputs = processor(
+#                 text=[text_prompt],
+#                 images=image_inputs,
+#                 videos=video_inputs,
+#                 padding=True,
+#                 return_tensors="pt",
+#             )
+#             inputs = inputs.to(model.device)
+#             generated_ids = model.generate(**inputs, max_new_tokens=128)
+#             generated_ids_trimmed = [
+#                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+#             ]
+#             output_text = processor.batch_decode(
+#                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+#             )
+#             return output_text[0]
+#         else:
+#             # 兼容Qwen2-VL-7B-Instruct等老模型
+#             message = getMessage(text, image=images, args=args)
+#             text_prompt = processor.apply_chat_template(
+#                 message, tokenize=False, add_generation_prompt=True
+#             )
+#             image_inputs, video_inputs = process_vision_info(message)
+#             inputs = processor(
+#                 text=[text_prompt],
+#                 images=image_inputs,
+#                 videos=video_inputs,
+#                 padding=True,
+#                 return_tensors="pt",
+#             ).to(model.device)
+#             generated_ids = model.generate(**inputs, max_new_tokens=128)
+#             generated_ids_trimmed = [
+#                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+#             ]
+#             output_text = processor.batch_decode(
+#                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+#             )
+#             return output_text[0]
     # ... 其它模型推理逻辑保持不变 ...
 

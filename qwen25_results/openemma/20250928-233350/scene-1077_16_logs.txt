@@ -1,0 +1,21 @@
+Scene Description: As an autonomous vehicle, I am currently driving on a multi-lane road at night. The scene is illuminated by streetlights, which cast a dim glow over the area. Here's a description of the driving scene based on the provided images:
+
+1. **Traffic Lights**: There are no visible traffic lights in the immediate vicinity of the vehicle. The road appears to be clear of any intersections with traffic signals.
+
+2. **Movements of Other Cars**: 
+   - In the distance, there are several vehicles traveling in the same direction as the autonomous vehicle. These cars appear to be maintaining a safe following distance from each other.
+   -
+Object Description: In the provided driving scene, there are several road users that you should pay attention to as an autonomous vehicle. Here are two important ones:
+
+1. **Vehicles Ahead (Lane 2 and Beyond):**
+   - **Location:** Vehicles can be seen in the lane directly ahead and further down the road.
+   - **Description:** These vehicles are traveling in the same direction as your vehicle. They are emitting headlights, indicating they are moving forward.
+   - **Importance:** It is crucial to monitor these vehicles because they represent potential obstacles. You need to maintain a safe following distance and be prepared to react if they suddenly brake or change
+Intent Description: Based on the analysis of the image and the context provided:
+
+1. **Lane Markings**: The ego car is currently in the center lane, and the lane markings are clearly visible. This suggests that the car should remain in this lane unless there is a specific reason to change.
+
+2. **Movement of Other Cars**: The cars ahead appear to be maintaining their lanes without any indication of congestion or the need for a lane change. There are no other vehicles directly in the path of the ego car that would require a change in direction.
+
+3. **Pedestrians**: There are no pedestrians visible in the image, so pedestrian safety is not
+Average Displacement Error: 8.70409856544926

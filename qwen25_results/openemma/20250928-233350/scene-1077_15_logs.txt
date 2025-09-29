@@ -1,0 +1,23 @@
+Scene Description: As an autonomous vehicle, I am currently driving on a multi-lane road at night. The scene is illuminated by streetlights, which cast a dim glow over the area. Here's a description of the driving scene based on the provided images:
+
+1. **Traffic Lights**: There are no visible traffic lights in the immediate vicinity of the vehicle. The road appears to be a straight stretch with no intersections or signals in sight.
+
+2. **Movements of Other Cars**: 
+   - In the distance, there are several vehicles traveling in the same direction as the autonomous vehicle. These cars appear to be maintaining a safe following distance.
+   -
+Object Description: In the provided driving scene, there are several road users that you should pay attention to as an autonomous vehicle. Here are two important ones:
+
+1. **Vehicle Ahead (Center of the Image):**
+   - **Location:** Center of the image.
+   - **Description:** A vehicle is ahead of your vehicle, traveling in the same lane. It appears to be a dark-colored sedan.
+   - **Importance:** This vehicle is crucial because it is directly in your path. You need to maintain a safe distance from it to avoid collisions. Additionally, if this vehicle suddenly stops or changes lanes, you must be prepared to react accordingly.
+
+
+Intent Description: Based on the analysis of the image and the context provided:
+
+1. **Lane Markings**: The ego car is currently in the center lane, and the lane markings are clearly visible. This suggests that the car should remain in this lane unless there is a specific reason to change.
+
+2. **Movement of Other Cars**: The cars ahead appear to be maintaining their lanes without any indication of congestion or the need for a lane change. There are no other vehicles directly in the path of the ego car that would require a change in direction.
+
+3. **Pedestrians**: There are no pedestrians visible in the image, so pedestrian safety is not
+Average Displacement Error: 8.690709206488217

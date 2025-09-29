@@ -1,0 +1,20 @@
+Scene Description: As I drive through this urban street, the traffic light ahead is red, indicating that I must stop. The road is clear in both directions, with no other vehicles immediately approaching from my current position. To my left, there are several parked cars along the curb, and to my right, there are a few cars moving in the opposite direction. 
+
+The lane markings are clearly visible: a double yellow line runs down the center of the road, separating the two directions of traffic. On the right side of the road, there is a "BUS" lane marked with white lines, which appears to be empty at the moment. There are no
+Object Description: As an autonomous vehicle, when analyzing the driving scene captured by the front-view camera, there are several road users that need to be monitored for safety and adherence to traffic rules. Here are two key road users to pay attention to:
+
+1. **Pedestrian near the right side (building entrance):**
+   - **Location:** The pedestrian is located near the building entrance on the right side of the image.
+   - **Description:** A person appears to be walking towards the building entrance.
+   - **Importance:** Pedestrians can suddenly step into the road, especially if they are crossing or entering/exiting buildings. Monitoring their movements
+Intent Description: Based on the lane markings and the movement of other cars and pedestrians in the image, here is an analysis of the desired intent of the ego car:
+
+1. **Lane Markings**: The road has clear yellow center lines and white side lines indicating lanes. There are no visible lane changes or turn signals that suggest the ego car should change lanes.
+
+2. **Movement of Other Cars**:
+   - The cars ahead appear to be moving in the same direction as the ego car.
+   - There are no cars directly in the path of the ego car that would require a lane change or a stop.
+
+3. **Pedestrians**:
+
+Average Displacement Error: 8.58185096295696
