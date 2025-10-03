@@ -25,6 +25,7 @@ openai
 # # Logging -------------------------------------
 # tensorboard>=2.4.1
 # comet-ml
+termcolor
 
 # # Plotting ------------------------------------
 pandas>=1.1.4

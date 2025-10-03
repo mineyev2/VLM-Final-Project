@@ -44,7 +44,7 @@ More details are provided here: https://gatech.service-now.com/home?id=kb_articl
 Download miniconda (I think it's not on the computer by default?)
 
 #### Configure Conda
-Conda uploads to local storage by default. We don't want this since setting up the OpenEMMA environment took up like 14GB for me even though we only have 300 GB.
+Conda envs get saved in local storage by default. We don't want this since setting up the OpenEMMA environment took up like 14GB for me even though we only have 30 GB.
 
 Update the package/environment folder locations to scratch as follows:
 ```
@@ -104,7 +104,7 @@ mkdir -p .cache/huggingface/hub
 ```
 python main.py \
     --model-path [model] \
-    --dataroot [dir-of-nuscnse-dataset] \
+    --dataroot [dir-of-nuscnse-dataset] \ <--- TODO: (Roman) I changed this
     --version [version-of-nuscnse-dataset] \
     --method openemma
 ```
@@ -116,3 +116,42 @@ python main.py \
 
 ### Resources
 - PACE-ICE Documentation: https://gatech.service-now.com/home?id=kb_article_view&sysparm_article=KB0042102
+
+### File Structure
+Let's roughly this structure (inspired by ChatGPT):
+
+```python
+my-ml-project/
+│
+├── datasets/                  # datasets
+│   └── ... 
+│
+├── notebooks/             # Jupyter notebooks for exploration, experiments
+│   └── 01_data_explore.ipynb
+│
+├── src/                   # Source code (all Python modules/scripts)
+│   ├── __init__.py
+│   ├── data/              # Data loading/preprocessing scripts
+│   ├── features/          # Feature engineering
+│   ├── models/            # Model architectures, training, evaluation
+│   ├── utils/             # Helper functions
+│   └── visualization/     # Plotting, metrics visualization
+│
+├── experiments/           # Configs, logs, results
+│   ├── configs/           # YAML/JSON configs for experiments
+│   ├── logs/              # Training logs
+│   └── runs/              # Model checkpoints, artifacts
+│
+├── tests/                 # Unit tests for src
+│
+├── scripts/               # Command-line runnable scripts
+│   ├── train.py
+│   ├── evaluate.py
+│   └── predict.py
+│
+├── requirements.txt       # Python dependencies (or environment.yml for conda)
+├── setup.py               # (Optional) if packaging project
+├── README.md              # Documentation, how to run
+├── .gitignore             # Ignore unnecessary files (e.g. /data, /runs, .ipynb_checkpoints)
+└── configs.yaml           # Default config (hyperparameters, paths)
+```

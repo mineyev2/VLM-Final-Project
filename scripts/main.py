@@ -1,5 +1,6 @@
 import base64
-import os.path
+import os
+import sys
 import gc
 import re
 import argparse
@@ -16,12 +17,14 @@ from pyquaternion import Quaternion
 from scipy.integrate import cumulative_trapezoid
 
 import json
-from openemma.YOLO3D.inference import yolo3d_nuScenes
-from utils import EstimateCurvatureFromTrajectory, IntegrateCurvatureForPoints, OverlayTrajectory, WriteImageSequenceToVideo
 from transformers import MllamaForConditionalGeneration, AutoProcessor, Qwen2VLForConditionalGeneration, AutoTokenizer
 from transformers import Qwen2_5_VLForConditionalGeneration
 from PIL import Image
 from qwen_vl_utils import process_vision_info
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src")) # add /src so we can access files in there
+from utils.utils import EstimateCurvatureFromTrajectory, IntegrateCurvatureForPoints, OverlayTrajectory, WriteImageSequenceToVideo
+from openemma.YOLO3D.inference import yolo3d_nuScenes
 from llava.model.builder import load_pretrained_model
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_PLACEHOLDER
 from llava.utils import disable_torch_init
@@ -35,17 +38,6 @@ FUT_LEN = 10
 TTL_LEN = OBS_LEN + FUT_LEN
 
 def getMessage(prompt, image=None, args=None):
-    """
-    Creates a message format for different VLM models based on the model type.
-    
-    Args:
-        prompt (str): The text prompt to send to the model
-        image: The image data (optional, format depends on model type)
-        args: Arguments object containing model_path to determine message format
-    
-    Returns:
-        list: Formatted message structure for the specific model type
-    """
     if "llama" in args.model_path or "Llama" in args.model_path:
         message = [
             {"role": "user", "content": [
@@ -64,21 +56,6 @@ def getMessage(prompt, image=None, args=None):
 
 
 def vlm_inference(text=None, images=None, sys_message=None, processor=None, model=None, tokenizer=None, args=None):
-    """
-    Performs inference using various Vision-Language Models (VLMs) including Llama, Qwen, LLaVA, and GPT.
-    
-    Args:
-        text (str): Input text prompt for the model
-        images: Image data (path or base64 depending on model)
-        sys_message (str): System message for GPT models (optional)
-        processor: Model processor for tokenization and formatting
-        model: The loaded VLM model
-        tokenizer: Tokenizer for certain model types
-        args: Arguments containing model configuration
-    
-    Returns:
-        str: Generated text response from the VLM
-    """
         if "llama" in args.model_path or "Llama" in args.model_path:
             image = Image.open(images).convert('RGB')
             message = getMessage(text, args=args)
@@ -188,19 +165,6 @@ def vlm_inference(text=None, images=None, sys_message=None, processor=None, mode
             return result.choices[0].message.content
 
 def SceneDescription(obs_images, processor=None, model=None, tokenizer=None, args=None):
-    """
-    Generates a natural language description of the driving scene from camera images.
-    
-    Args:
-        obs_images: Observed camera images from the vehicle
-        processor: Model processor for tokenization
-        model: The VLM model for inference
-        tokenizer: Tokenizer (if needed)
-        args: Arguments containing model configuration
-    
-    Returns:
-        str: Natural language description of the driving scene
-    """
     prompt = f"""You are a autonomous driving labeller. You have access to these front-view camera images of a car taken at a 0.5 second interval over the past 5 seconds. Imagine you are driving the car. Describe the driving scene according to traffic lights, movements of other cars or pedestrians and lane markings."""
 
     if "llava" in args.model_path:
@@ -210,19 +174,6 @@ def SceneDescription(obs_images, processor=None, model=None, tokenizer=None, arg
     return result
 
 def DescribeObjects(obs_images, processor=None, model=None, tokenizer=None, args=None):
-    """
-    Identifies and describes important objects and road users in the driving scene.
-    
-    Args:
-        obs_images: Observed camera images from the vehicle
-        processor: Model processor for tokenization
-        model: The VLM model for inference
-        tokenizer: Tokenizer (if needed)
-        args: Arguments containing model configuration
-    
-    Returns:
-        str: Description of important objects/road users and their significance
-    """
 
     prompt = f"""You are a autonomous driving labeller. You have access to a front-view camera images of a vehicle taken at a 0.5 second interval over the past 5 seconds. Imagine you are driving the car. What other road users should you pay attention to in the driving scene? List two or three of them, specifying its location within the image of the driving scene and provide a short description of the that road user on what it is doing, and why it is important to you."""
 
@@ -231,20 +182,6 @@ def DescribeObjects(obs_images, processor=None, model=None, tokenizer=None, args
     return result
 
 def DescribeOrUpdateIntent(obs_images, prev_intent=None, processor=None, model=None, tokenizer=None, args=None):
-    """
-    Determines or updates the driving intent of the ego vehicle based on visual observations.
-    
-    Args:
-        obs_images: Observed camera images from the vehicle
-        prev_intent (str): Previous intent description (optional)
-        processor: Model processor for tokenization
-        model: The VLM model for inference
-        tokenizer: Tokenizer (if needed)
-        args: Arguments containing model configuration
-    
-    Returns:
-        str: Current driving intent description (turn left/right, go straight, speed up/down)
-    """
 
     if prev_intent is None:
         prompt = f"""You are a autonomous driving labeller. You have access to a front-view camera images of a vehicle taken at a 0.5 second interval over the past 5 seconds. Imagine you are driving the car. Based on the lane markings and the movement of other cars and pedestrians, describe the desired intent of the ego car. Is it going to follow the lane to turn left, turn right, or go straight? Should it maintain the current speed or slow down or speed up?"""
@@ -264,27 +201,6 @@ def DescribeOrUpdateIntent(obs_images, prev_intent=None, processor=None, model=N
 
 
 def GenerateMotion(obs_images, obs_waypoints, obs_velocities, obs_curvatures, given_intent, processor=None, model=None, tokenizer=None, args=None):
-    """
-    Generates future motion predictions (speeds and curvatures) based on visual observations and historical data.
-    
-    Args:
-        obs_images: Observed camera images from the vehicle
-        obs_waypoints: Historical waypoints of the ego vehicle
-        obs_velocities: Historical velocity vectors
-        obs_curvatures: Historical curvature values
-        given_intent (str): Previous driving intent
-        processor: Model processor for tokenization
-        model: The VLM model for inference
-        tokenizer: Tokenizer (if needed)
-        args: Arguments containing model configuration
-    
-    Returns:
-        tuple: (prediction_result, scene_description, object_description, intent_description)
-            - prediction_result (str): Future speeds and curvatures in specified format
-            - scene_description (str): Scene description (if openemma method)
-            - object_description (str): Object descriptions (if openemma method) 
-            - intent_description (str): Updated intent description (if openemma method)
-    """
     # assert len(obs_images) == len(obs_waypoints)
 
     scene_description, object_description, intent_description = None, None, None
@@ -333,11 +249,10 @@ if __name__ == '__main__':
         print("CUDA is unavailable! Closing program")
         quit()
 
-    # TODO: (Roman): Clean this stuff, a lot of it is unnecessary
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="qwen")
     parser.add_argument("--plot", type=bool, default=True)
-    parser.add_argument("--dataroot", type=str, default='datasets/NuScenes')
+    parser.add_argument("--dataset", type=str, default="NuScenes", help="Dataset type (e.g., NuScenes)")
     parser.add_argument("--version", type=str, default='v1.0-mini')
     parser.add_argument("--method", type=str, default='openemma')
     args = parser.parse_args()
@@ -351,24 +266,59 @@ if __name__ == '__main__':
         print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GiB total")
         print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GiB")
 
+    # Construct full dataset path based on dataset type
+    dataset_root = os.path.join(os.path.dirname(__file__), "..", "datasets", args.dataset)
+    print(f"Dataset root: {dataset_root}")
 
     model = None
     processor = None
     tokenizer = None
     qwen25_loaded = False
-
     try:
-        print("Loading Qwen2.5-VL-7B-Instruct...")
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            "Qwen/Qwen2.5-VL-7B-Instruct",
-            dtype=torch.float16,
-            device_map="auto"
-            # attn_implementation="flash_attention_2" # <--- not sure what this means (Roman)
-        )
-        processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
-        tokenizer = None
-        qwen25_loaded = True
-    
+        # 优先本地加载Qwen2.5-VL-3B-Instruct，并优选flash attention
+        if "qwen25" in args.model_path:
+            try:
+                print("Loading Qwen2.5-VL-7B-Instruct")
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2.5-VL-7B-Instruct",
+                    dtype=torch.float16,
+                    device_map="auto"
+                    # attn_implementation="flash_attention_2" # <--- not sure what this means (Roman)
+                )
+                processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+                tokenizer = None
+                qwen25_loaded = True
+
+            except Exception as e:
+                print("Exception: ", e)
+
+        elif "qwen" in args.model_path or "Qwen" in args.model_path:
+            try:
+                print("Trying Qwen2-VL-7B-Instruct...") # TODO: Use bigger model for PACE
+                model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    "Qwen/Qwen2-VL-7B-Instruct",
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto"
+                )
+                processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+                tokenizer = None
+                qwen25_loaded = False
+                print("已加载 Qwen2-VL-7B-Instruct。")
+            except Exception as e:
+                print("Exception: ", e)
+        else:
+            if "llava" == args.model_path:    
+                disable_torch_init()
+                tokenizer, model, processor, context_len = load_pretrained_model("liuhaotian/llava-v1.6-mistral-7b", None, "llava-v1.6-mistral-7b")
+                image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            elif "llava" in args.model_path:
+                disable_torch_init()
+                tokenizer, model, processor, context_len = load_pretrained_model(args.model_path, None, "llava-v1.6-mistral-7b")
+                image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            else:
+                model = None
+                processor = None
+                tokenizer=None
     except Exception as e:
         print("模型加载出现异常：", e)
 
@@ -386,11 +336,13 @@ if __name__ == '__main__':
     os.makedirs(timestamp, exist_ok=True)
 
     # Load the dataset
-    nusc = NuScenes(version=args.version, dataroot=args.dataroot)
-    scenes = nusc.scene
-    print(f"Number of scenes: {len(scenes)}")
+    nusc = NuScenes(version=args.version, dataroot=dataset_root)
 
     # Iterate the scenes
+    scenes = nusc.scene
+    
+    print(f"Number of scenes: {len(scenes)}")
+
     for scene in scenes:
         token = scene['token']
         first_sample_token = scene['first_sample_token']
@@ -601,3 +553,65 @@ if __name__ == '__main__':
 
         if args.plot:
             WriteImageSequenceToVideo(cam_images_sequence, f"{timestamp}/{name}")
+
+        # break  # Scenes
+
+
+# def vlm_inference(text=None, images=None, sys_message=None, processor=None, model=None, tokenizer=None, args=None):
+#     if ("qwen" in args.model_path or "Qwen" in args.model_path):
+#         # 判断是否为Qwen2.5-VL-3B-Instruct（新版）
+#         if hasattr(model, "model_type") and getattr(model, "model_type", "") == "qwen2_5_vl":
+#             # Qwen2.5-VL-3B-Instruct官方推荐推理方式
+#             message = [
+#                 {
+#                     "role": "user",
+#                     "content": [
+#                         {"type": "image", "image": images},
+#                         {"type": "text", "text": text}
+#                     ]
+#                 }
+#             ]
+#             text_prompt = processor.apply_chat_template(
+#                 message, tokenize=False, add_generation_prompt=True
+#             )
+#             image_inputs, video_inputs = process_vision_info(message)
+#             inputs = processor(
+#                 text=[text_prompt],
+#                 images=image_inputs,
+#                 videos=video_inputs,
+#                 padding=True,
+#                 return_tensors="pt",
+#             )
+#             inputs = inputs.to(model.device)
+#             generated_ids = model.generate(**inputs, max_new_tokens=128)
+#             generated_ids_trimmed = [
+#                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+#             ]
+#             output_text = processor.batch_decode(
+#                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+#             )
+#             return output_text[0]
+#         else:
+#             # 兼容Qwen2-VL-7B-Instruct等老模型
+#             message = getMessage(text, image=images, args=args)
+#             text_prompt = processor.apply_chat_template(
+#                 message, tokenize=False, add_generation_prompt=True
+#             )
+#             image_inputs, video_inputs = process_vision_info(message)
+#             inputs = processor(
+#                 text=[text_prompt],
+#                 images=image_inputs,
+#                 videos=video_inputs,
+#                 padding=True,
+#                 return_tensors="pt",
+#             ).to(model.device)
+#             generated_ids = model.generate(**inputs, max_new_tokens=128)
+#             generated_ids_trimmed = [
+#                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+#             ]
+#             output_text = processor.batch_decode(
+#                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+#             )
+#             return output_text[0]
+    # ... 其它模型推理逻辑保持不变 ...
+

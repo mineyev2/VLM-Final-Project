@@ -12,7 +12,6 @@ from openemma.visualize.visualize import CamParams
 from openemma.YOLO3D.inference import yolo3d_nuScenes
 from scipy.spatial.transform import Rotation as R
 
-
 class BaseOpenEMMA:
     def __init__(self, args):
         super(BaseOpenEMMA, self).__init__()
