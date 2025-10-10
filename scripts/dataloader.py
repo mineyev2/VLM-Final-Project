@@ -31,8 +31,9 @@ class NuScenesDataset(Dataset):
         for scene in self.nusc.scene:
             first_sample_token = scene['first_sample_token']
             sample = self.nusc.get('sample', first_sample_token)
-
-            while sample: # Continuously get next sample in current scene until we run out of all samples
+            
+            # Continuously get next sample in current scene until we run out of all samples
+            while sample:
                 self.sample_tokens.append(sample['token'])
                 if sample['next'] == '':
                     break
@@ -48,7 +49,6 @@ class NuScenesDataset(Dataset):
         sample = self.nusc.get('sample', sample_token)
 
         # Get LiDAR point cloud with nsweeps
-        # lidar_token = sample['data']['LIDAR_TOP']
         nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
             self.nusc,
             sample,
@@ -58,8 +58,7 @@ class NuScenesDataset(Dataset):
             min_distance=1.0  # Filter out points closer than 1 meter
         )
 
-        # Convert pointcloud to torch tensor
-        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points)  # shape (4
+        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points) # 4 x N
 
         # Get front camera image
         camera_token = sample['data']['CAM_FRONT']
@@ -69,8 +68,3 @@ class NuScenesDataset(Dataset):
         torch_image = torch.from_numpy(image)  # H x W x 3
 
         return torch_pointcloud, torch_image
-def main():
-    pass
-
-if __name__ == "__main__":
-    main()
