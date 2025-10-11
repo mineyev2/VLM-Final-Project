@@ -5,7 +5,7 @@ import os, sys
 import torch
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from dataloader import NuScenesDataset
+from scripts.nuscenes_dataset import NuScenesDataset
 
 def main():
     # Getting LiDAR point clouds
