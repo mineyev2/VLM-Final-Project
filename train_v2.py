@@ -24,6 +24,19 @@ def main():
     # Add a new argument for the penalty weight, allowing it to be tuned
     parser.add_argument("--penalty_weight", type=float, default=5.0, help="Weight for the missing waypoint penalty.")
     parser.add_argument("--output_dir", type=str, default="./outputs/latest", help="Directory to save model and plots.")
+    parser.set_defaults(freeze_vision_tower=True, freeze_lang_model=True)
+    parser.add_argument(
+        "--unfreeze-vision-tower",
+        dest="freeze_vision_tower",
+        action="store_false",
+        help="Unfreeze the vision tower for fine-tuning."
+    )
+    parser.add_argument(
+        "--unfreeze-lang-model",
+        dest="freeze_lang_model",
+        action="store_false",
+        help="Unfreeze the language model for fine-tuning."
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -77,12 +90,24 @@ def main():
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=custom_collate_fn)
     
     optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
+    if args.freeze_vision_tower:
+        model.vision_tower.requires_grad_(False)
+    else:
+        optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
+    if args.freeze_lang_model:
+        model.language_model.requires_grad_(False)
+    else:
+        optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     print(colored("Starting training...", "blue"))
     loss_history = []
     for epoch in range(args.epochs):
         model.mlp_projector.train()
+        if not args.freeze_vision_tower:
+            model.vision_tower.train()
+        if not args.freeze_lang_model:
+            model.language_model.train()
         total_loss = 0.0
         
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")

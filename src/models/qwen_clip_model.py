@@ -23,9 +23,6 @@ class QwenCLIPModel(nn.Module):
         )
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
 
-        self.vision_tower.requires_grad_(False)
-        self.language_model.requires_grad_(False)
-
         clip_hidden_size = self.vision_tower.config.hidden_size
         qwen_hidden_size = self.language_model.config.hidden_size
         self.mlp_projector = nn.Sequential(
