@@ -1,88 +1,107 @@
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, CLIPImageProcessor, AutoModelForCausalLM, AutoTokenizer
-from PIL import Image
-import os
+import re
 
 class QwenCLIPModel(nn.Module):
 
-    def __init__(self, qwen_model_name="Qwen/Qwen2.5-3B-Instruct", clip_model_name="openai/clip-vit-large-patch14"):
+    def __init__(self, device, qwen_model_name="Qwen/Qwen2.5-3B-Instruct", clip_model_name="openai/clip-vit-large-patch14"):
         super().__init__()
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+        self.device = device
+        print(f"Using device {self.device} for QwenCLIPModel.")
+
         print("Loading CLIP vision model...")
-        self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name)
+        self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
         self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
-        
+
         print(f"Loading Qwen language model: {qwen_model_name}...")
         self.language_model = AutoModelForCausalLM.from_pretrained(
             qwen_model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto"
         )
         self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
 
-        # Freeze the pre-trained models so only the projector is trained
         self.vision_tower.requires_grad_(False)
         self.language_model.requires_grad_(False)
 
-        # Get the embedding dimensions for the projector
         clip_hidden_size = self.vision_tower.config.hidden_size
         qwen_hidden_size = self.language_model.config.hidden_size
-
-        # "Glue" layer
         self.mlp_projector = nn.Sequential(
             nn.Linear(clip_hidden_size, qwen_hidden_size * 4),
             nn.GELU(),
-            nn.Linear(qwen_hidden_size * 4, qwen_hidden_size * 4),
+            nn.Linear(qwen_hidden_size  * 4, qwen_hidden_size * 4),
             nn.GELU(),
-            nn.Linear(qwen_hidden_size * 4, qwen_hidden_size)
-        ).to(self.device)
+            nn.Linear(qwen_hidden_size * 4, qwen_hidden_size),
+        ).to(self.device).to(torch.bfloat16)
 
+        self.prompt_part1 = (
+            "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
+            "Your last three recorded positions (x, y) are: "
+        )
+        self.prompt_part2 = (
+            "It is critical that you output exactly 10 waypoints. "
+            "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
+            "For example:\n"
+            "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
+        )
 
+    def forward(self, images, input_ids):
+        """
+        FOR TRAINING:
+        This method now takes the final tensors as input and returns logits.
+        It does NOT do any data prep like tokenizing or prompt creation.
+        That should be done in the training loop.
+        """
+        # 1. Process the image input
+        image_features = self.vision_tower(pixel_values=images).last_hidden_state
+        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
 
-    def forward(self, image_path, text_prompt):
+        # 2. Get the embeddings for the text input
+        text_embeddings = self.language_model.get_input_embeddings()(input_ids)
 
-        # Process the image with CLIP's processor and model
-        pil_image = Image.open(image_path).convert('RGB') # Might have to change this based on how we're loading data
-        image_inputs = self.image_processor(images=pil_image, return_tensors="pt").to(self.device)
-        image_features = self.vision_tower(**image_inputs).last_hidden_state
-        
-        # Project the image features through the trainable MLP
-        projected_image_features = self.mlp_projector(image_features)
-
-        # Prepare the text prompt using the chat template for better performance
-        messages = [
-            {"role": "user", "content": text_prompt}
-        ]
-        # apply_chat_template handles the special tokens and formatting for you
-        full_prompt_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        
-        # Tokenize the formatted text prompt
-        text_input_ids = self.tokenizer(full_prompt_text, return_tensors="pt").input_ids.to(self.device)
-        
-        # Get the corresponding text embeddings from the language model
-        embedding_layer = self.language_model.get_input_embeddings()
-        text_embeddings = embedding_layer(text_input_ids)
-        
-        # Combine image and text embeddings by concatenating them
-        # The LLM will "see" the image first, then read the text prompt
+        # 3. Combine image and text embeddings
         combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
         
-        # Generate text using the combined embeddings
-        # We pass `inputs_embeds` directly, bypassing the model's normal embedding lookup
-        output_ids = self.language_model.generate(
+        # 4. Get the raw logits from the language model
+        outputs = self.language_model(inputs_embeds=combined_embeddings)
+
+        return outputs.logits
+
+    def generate_trajectory(self, images, ego_positions):
+        """
+        FOR INFERENCE: The non-differentiable generation method.
+        """
+        image_features = self.vision_tower(pixel_values=images).last_hidden_state
+        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
+
+        # --- Prompt formatting (same as before) ---
+        prompts = []
+        for pos_tensor in ego_positions:
+            pos_list = [f"[{pos[0]:.2f}, {pos[1]:.2f}]" for pos in pos_tensor]
+            pos_str = ", ".join(pos_list)
+            final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
+            prompts.append(final_prompt)
+
+        full_prompts = [self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
+        ) for p in prompts]
+        
+        inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
+        text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
+        combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
+
+        # --- Generation (same as before) ---
+        outputs = self.language_model.generate(
             inputs_embeds=combined_embeddings,
             max_new_tokens=512,
-            pad_token_id=self.tokenizer.eos_token_id # Suppress warnings
+            pad_token_id=self.tokenizer.eos_token_id,
+            output_scores=True,
+            return_dict_in_generate=True
         )
-        
-        # Decode the output, slicing off the input tokens to get only the generated part
-        generated_text = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
-        
-        # Clean up the output to remove the prompt text
-        response = generated_text.replace(self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False), "").strip()
 
-        return response
-    
+        generated_ids = outputs.sequences
+        generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        return outputs, generated_text
+
