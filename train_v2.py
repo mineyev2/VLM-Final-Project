@@ -150,6 +150,8 @@ def main():
     model_save_path = os.path.join(args.output_dir, "image_projector.pth")
     torch.save({
         'model_state_dict': model.mlp_projector.state_dict(),
+        'vision_tower_state_dict': model.vision_tower.state_dict(),
+        'language_model_state_dict': model.language_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss_history': loss_history,
         'epochs': args.epochs,
