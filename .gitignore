@@ -15,6 +15,8 @@ env/
 # Logs and data
 *.log
 *.pkl
+*.pth
+*.ckpt
 
 # Project specific
 gpt_results/
@@ -23,3 +25,4 @@ qwen25_results/
 experiments/runs/
 
 datasets/
+outputs/

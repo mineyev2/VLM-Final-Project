@@ -1,0 +1,139 @@
+_wandb:
+    value:
+        cli_version: 0.22.2
+        e:
+            yotd7h6iub5nkc8wpifmnyrucp6rkiyp:
+                args:
+                    - --epoch=100
+                    - --run_name=10-13-unfreeze clip-1
+                    - --save_every=10
+                    - --batch_size=46
+                    - --unfreeze-vision-tower
+                codePath: train_v3.py
+                codePathLocal: train_v3.py
+                cpu_count: 64
+                cpu_count_logical: 64
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "53619982336"
+                        used: "27198468096"
+                email: hliu852@gatech.edu
+                executable: /home/hice1/hliu852/scratch/miniconda/envs/openemma/bin/python3
+                git:
+                    commit: fcfd6c56e57aad190ec208423658146870036faf
+                    remote: https://github.com/mineyev2/VLM-Final-Project.git
+                gpu: NVIDIA H200
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Hopper
+                      cudaCores: 16896
+                      memoryTotal: "150754820096"
+                      name: NVIDIA H200
+                      uuid: GPU-0ac39896-e6a3-84e7-f18f-88e1e90e4e2e
+                host: atl1-1-03-017-2-0.pace.gatech.edu
+                memory:
+                    total: "2163478577152"
+                os: Linux-5.14.0-570.37.1.el9_6.x86_64-x86_64-with-glibc2.34
+                program: /storage/ice1/0/0/hliu852/VLM-Final-Project/train_v3.py
+                python: CPython 3.10.18
+                root: /storage/ice1/0/0/hliu852/VLM-Final-Project
+                slurm:
+                    cluster_name: ice-slurm
+                    conf: /var/lib/slurm/slurmd/conf-cache/slurm.conf
+                    cpus_on_node: "4"
+                    export_env: NONE
+                    get_user_env: "1"
+                    gpus_on_node: "1"
+                    gtids: "0"
+                    job_account: ic
+                    job_cpus_per_node: "4"
+                    job_end_time: "1760408812"
+                    job_gid: "2626"
+                    job_gpus: "2"
+                    job_id: "3370028"
+                    job_name: sys/dashboard/sys/bc_desktop_rh9
+                    job_nodelist: atl1-1-03-017-2-0
+                    job_num_nodes: "1"
+                    job_partition: ice-gpu
+                    job_qos: coc-ice
+                    job_start_time: "1760365612"
+                    job_uid: "3603700"
+                    job_user: hliu852
+                    jobid: "3370028"
+                    localid: "0"
+                    mem_per_cpu: "4096"
+                    mpi_type: pmix_v4
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: atl1-1-03-017-2-0
+                    nprocs: "4"
+                    ntasks: "4"
+                    ntasks_per_node: "4"
+                    oom_kill_step: "0"
+                    pmix_tmpdir: /tmp
+                    prio_process: "0"
+                    procid: "0"
+                    root: /opt/slurm/current
+                    script_context: prolog_task
+                    submit_dir: /var/www/ood/apps/sys/dashboard
+                    submit_host: ondemand-ice.pace.gatech.edu
+                    task_pid: "3589291"
+                    tasks_per_node: "4"
+                    topology_addr: atl1-1-03-017-2-0
+                    topology_addr_pattern: node
+                startedAt: "2025-10-13T15:53:30.187822Z"
+                writerId: yotd7h6iub5nkc8wpifmnyrucp6rkiyp
+        m: []
+        python_version: 3.10.18
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 71
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 71
+            "3":
+                - 13
+                - 16
+            "4": 3.10.18
+            "5": 0.22.2
+            "6": 4.56.2
+            "12": 0.22.2
+            "13": linux-x86_64
+batch_size:
+    value: 46
+dataroot:
+    value: ./datasets/nuscenes
+epochs:
+    value: 100
+freeze_lang_model:
+    value: true
+freeze_vision_tower:
+    value: false
+lr:
+    value: 1e-05
+num_workers:
+    value: 4
+output_dir:
+    value: ./outputs/latest/10-13-unfreeze clip-1
+penalty_weight:
+    value: 5
+run_name:
+    value: 10-13-unfreeze clip-1
+save_every:
+    value: 10
+version:
+    value: v1.0-mini
+wandb_project:
+    value: vlm-training
