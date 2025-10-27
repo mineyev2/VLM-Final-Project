@@ -1,12 +1,15 @@
 # ============================================================================
-# sst.py — MMEngine/MMCV 2.0 friendly SST wrapper (keeps original logic)
+# sst.py — MMEngine/MMCV 2.x friendly SST wrapper (keeps original logic)
 #
-# - Provides a real dummy module "mmcv._ext" and patches ext_loader.load_ext
-#   to return a stub with requested function names (so imports don't fail).
-# - Uses mmengine Config and mmdet3d registry to build models.
-# - Initializes default scope ('mmdet3d') when available.
-# - Backward-compatible arg names: sst_config_path / sst_ckpt_path.
-# - Does NOT add pooling/attention or change your model outputs.
+# - Uses mmengine Config and the mmdet3d v2 registry to build models.
+# - Falls back to legacy v1 builder only if needed (for old stacks).
+# - Initializes default scope ('mmdet3d') so registries resolve correctly.
+# - (Nice-to-have) Patches mmcv.utils.ext_loader.load_ext to provide stub
+#   functions when compiled CUDA/C++ ops are missing, preventing ImportError
+#   at import time. If you actually invoke those ops, you'll still get a clear
+#   NotImplementedError telling you to install the proper mmcv wheel.
+# - Backward-compatible arg aliases: sst_config_path / sst_ckpt_path.
+# - Does NOT change outputs; just a thin build+forward wrapper.
 # ============================================================================
 
 from __future__ import annotations
@@ -89,13 +92,15 @@ except Exception:
 def _build_model_from_cfg(model_cfg: Dict[str, Any],
                           train_cfg: Optional[Dict[str, Any]] = None,
                           test_cfg: Optional[Dict[str, Any]] = None):
+    # New (v2) path
     try:
         from mmdet3d.registry import MODELS  # new MMEngine registry
         return MODELS.build(model_cfg)
     except Exception:
-        # Legacy path
+        # Legacy (v1) fallback
         from mmdet3d.models import build_model as legacy_build_model  # type: ignore
         return legacy_build_model(model_cfg, train_cfg=train_cfg, test_cfg=test_cfg)
+
 
 def _load_checkpoint_mmengine(model, checkpoint_path: str):
     try:
@@ -172,7 +177,7 @@ class LidarEncoderSST(nn.Module):
             test_cfg=self.cfg.get('test_cfg')
         )
 
-        # Initialize weights if available
+        # Initialize weights if available (no-op for many MMDet3D models)
         if init_weights and hasattr(self.model, 'init_weights'):
             try:
                 self.model.init_weights()
@@ -186,9 +191,7 @@ class LidarEncoderSST(nn.Module):
     # -------------------------- Public API ---------------------------------
 
     def extract_feat(self, *args, **kwargs):
-        """
-        Call through to the underlying model, preferring `extract_feat`.
-        """
+        """Call through to the underlying model, preferring `extract_feat`."""
         if hasattr(self.model, 'extract_feat'):
             return self.model.extract_feat(*args, **kwargs)  # type: ignore
         if hasattr(self.model, 'backbone'):
