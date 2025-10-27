@@ -1,242 +1,248 @@
-# ============================================================================
-# sst.py — MMEngine/MMCV 2.x friendly SST wrapper (keeps original logic)
+# =============================================================================
+# sst.py — OpenMMLab v2 (MMEngine/MMCV2/mmdet3d>=1.0) compatible SST wrapper
+# =============================================================================
+# Key changes vs. legacy code:
+#   1) Uses mmengine.Config (NOT mmcv.Config) and the v2 registry build path:
+#        from mmdet3d.registry import MODELS
+#        model = MODELS.build(cfg.model)
+#   2) Initializes default scope ('mmdet3d') so registries resolve correctly.
+#   3) Robust feature extraction: handles list/tuple/dict/Tensor returns.
+#   4) Optional checkpoint loading via mmengine.runner.load_checkpoint.
+#   5) Keeps your AttentionPool2d integration unchanged.
 #
-# - Uses mmengine Config and the mmdet3d v2 registry to build models.
-# - Falls back to legacy v1 builder only if needed (for old stacks).
-# - Initializes default scope ('mmdet3d') so registries resolve correctly.
-# - (Nice-to-have) Patches mmcv.utils.ext_loader.load_ext to provide stub
-#   functions when compiled CUDA/C++ ops are missing, preventing ImportError
-#   at import time. If you actually invoke those ops, you'll still get a clear
-#   NotImplementedError telling you to install the proper mmcv wheel.
-# - Backward-compatible arg aliases: sst_config_path / sst_ckpt_path.
-# - Does NOT change outputs; just a thin build+forward wrapper.
-# ============================================================================
+# This file intentionally avoids v1-era APIs such as:
+#   - from mmcv import Config
+#   - from mmdet3d.models import build_model
+# =============================================================================
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-# ----------------------------------------------------------------------------
-# 0) Make a real module for 'mmcv._ext' and patch ext_loader.load_ext
-# ----------------------------------------------------------------------------
-import sys
-import types
+import torch
+from torch import nn
 
-# Ensure 'mmcv._ext' exists as a real module (importlib looks in sys.modules)
-if 'mmcv._ext' not in sys.modules:
-    sys.modules['mmcv._ext'] = types.ModuleType('mmcv._ext')
+# v2 stack: mmengine config + default scope
+from mmengine.config import Config
+from mmengine.registry import init_default_scope
 
-# Patch mmcv.utils.ext_loader.load_ext to provide stubbed functions on demand
+# v2 stack: build models via the registry
+from mmdet3d.registry import MODELS as MMDET3D_MODELS
+
+# Optional: checkpoint loader (v2)
 try:
-    from mmcv.utils import ext_loader as _ext_loader_mod  # type: ignore
-    _orig_load_ext = _ext_loader_mod.load_ext
-
-    def _safe_stub_func(fname: str):
-        def _stub(*args, **kwargs):
-            raise NotImplementedError(
-                f"mmcv C++/CUDA op '{fname}' is unavailable in this environment. "
-                "Install a wheel of mmcv with compiled ops matching your Torch/CUDA."
-            )
-        _stub.__name__ = fname
-        return _stub
-
-    def _patched_load_ext(name: str, funcs):
-        """
-        Try the original loader; if it fails, create/fill a stub module
-        (e.g., mmcv._ext) with the requested function names so import succeeds.
-        """
-        try:
-            return _orig_load_ext(name, funcs)
-        except Exception:
-            modname = f"mmcv.{name}" if not name.startswith('mmcv.') else name
-            mod = sys.modules.get(modname)
-            if mod is None:
-                mod = types.ModuleType(modname)
-                sys.modules[modname] = mod
-            # Ensure every requested function exists on the module
-            if isinstance(funcs, (list, tuple)):
-                for f in funcs:
-                    if not hasattr(mod, f):
-                        setattr(mod, f, _safe_stub_func(f))
-            elif isinstance(funcs, str):
-                if not hasattr(mod, funcs):
-                    setattr(mod, funcs, _safe_stub_func(funcs))
-            return mod
-
-    _ext_loader_mod.load_ext = _patched_load_ext  # type: ignore[attr-defined]
-except Exception:
-    # If mmcv isn't present yet or API differs, we just proceed; the real import
-    # will likely work, or you'll see a clearer error.
-    pass
-
-# ----------------------------------------------------------------------------
-# 1) MMEngine / MMCV2 config + default scope
-# ----------------------------------------------------------------------------
-try:
-    from mmengine.config import Config  # preferred in mmcv>=2 stack
+    from mmengine.runner import load_checkpoint
 except Exception:  # pragma: no cover
-    from mmcv import Config  # legacy fallback
+    load_checkpoint = None  # type: ignore
 
-# Initialize default scope for mmdet3d (helps registry find components)
-try:
-    from mmengine.registry import init_default_scope
+# Project-local imports
+from lidarclip.model.attention_pool import AttentionPool2d
+from lidarclip.model.sst_encoder_only_config import model as sst_model_conf
+
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+def _as_config(cfg_like: Union[str, Dict[str, Any], Config]) -> Config:
+    """Normalize input to an mmengine.Config.
+
+    Args:
+        cfg_like: Path to config file, dict-like, or already a Config.
+
+    Returns:
+        Config: A normalized mmengine.Config instance.
+    """
+    if isinstance(cfg_like, Config):
+        return cfg_like
+    if isinstance(cfg_like, str):
+        return Config.fromfile(cfg_like)
+    if isinstance(cfg_like, dict):
+        return Config(cfg_like)
+    raise TypeError(
+        "Config must be a path, dict, or mmengine.config.Config"
+    )
+
+
+def _build_model_v2(cfg: Config):
+    """Build an MMDetection3D model using the v2 registry.
+
+    Notes:
+        - We set default scope to 'mmdet3d' before building so that cross-package
+          registries (backbone/neck/heads from mmdet, etc.) resolve correctly.
+        - We do not pass train_cfg/test_cfg here; in v2 they live inside cfg.model.
+    """
     try:
         init_default_scope('mmdet3d')
     except Exception:
+        # It's fine if the scope is already initialized or mmengine version differs
         pass
-except Exception:
-    pass
 
-# ----------------------------------------------------------------------------
-# 2) Build helpers: prefer the new registry; fallback to legacy builder
-# ----------------------------------------------------------------------------
-def _build_model_from_cfg(model_cfg: Dict[str, Any],
-                          train_cfg: Optional[Dict[str, Any]] = None,
-                          test_cfg: Optional[Dict[str, Any]] = None):
-    # New (v2) path
-    try:
-        from mmdet3d.registry import MODELS  # new MMEngine registry
-        return MODELS.build(model_cfg)
-    except Exception:
-        # Legacy (v1) fallback
-        from mmdet3d.models import build_model as legacy_build_model  # type: ignore
-        return legacy_build_model(model_cfg, train_cfg=train_cfg, test_cfg=test_cfg)
+    model = MMDET3D_MODELS.build(cfg.model)
+
+    # Optional: some models keep init_weights; safe to call if present.
+    if hasattr(model, 'init_weights'):
+        try:
+            model.init_weights()
+        except Exception:
+            # Not all components implement it in v2
+            pass
+
+    return model
 
 
-def _load_checkpoint_mmengine(model, checkpoint_path: str):
-    try:
-        from mmengine.runner import load_checkpoint  # type: ignore
-        load_checkpoint(model, checkpoint_path, map_location='cpu')
-        return True
-    except Exception:
-        import torch
-        state = torch.load(checkpoint_path, map_location='cpu')
+def _maybe_load_checkpoint(model: nn.Module, checkpoint: Optional[str]) -> None:
+    if not checkpoint:
+        return
+    if load_checkpoint is None:
+        # Fallback: torch.load state_dict (best-effort)
+        state = torch.load(checkpoint, map_location='cpu')
         state_dict = state.get('state_dict', state)
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing:
-            print(f"[sst] Missing keys: {missing[:12]}{' ...' if len(missing) > 12 else ''}")
-        if unexpected:
-            print(f"[sst] Unexpected keys: {unexpected[:12]}{' ...' if len(unexpected) > 12 else ''}")
-        return True
+        model.load_state_dict(state_dict, strict=False)
+        return
+    load_checkpoint(model, checkpoint, map_location='cpu')
 
-# ----------------------------------------------------------------------------
-# 3) SST wrapper — original logic: build + pass-through calls
-# ----------------------------------------------------------------------------
-import torch
-import torch.nn as nn
 
+def _select_first_feature(feats: Any) -> torch.Tensor:
+    """Normalize various feature outputs to a single Tensor.
+
+    Accepts:
+        - Tensor
+        - list/tuple of Tensors (returns first)
+        - dict of {name: Tensor} (returns first value by key order)
+    """
+    if isinstance(feats, torch.Tensor):
+        return feats
+    if isinstance(feats, (list, tuple)) and len(feats) > 0:
+        return feats[0]
+    if isinstance(feats, dict) and len(feats) > 0:
+        # Fetch first value deterministically
+        return next(iter(feats.values()))
+    raise TypeError(
+        f"Unsupported feature output type: {type(feats)}"
+    )
+
+
+# -----------------------------------------------------------------------------
+# Public API: LidarEncoderSST
+# -----------------------------------------------------------------------------
 
 class LidarEncoderSST(nn.Module):
+    """SST-based LiDAR encoder (OpenMMLab v2 compatible).
+
+    Parameters
+    ----------
+    sst_config : str | dict | mmengine.config.Config
+        Path to an MMEngine-style config, a dict, or a Config. Only the
+        `model` part will be used to build the encoder.
+    clip_embedding_dim : int, default=512
+        Projection dimension expected by the downstream CLIP text encoder.
+    checkpoint : str | None, default=None
+        Optional checkpoint path to load model weights.
+    pool_num_heads : int, default=8
+        Number of heads for the AttentionPool2d.
+
+    Notes
+    -----
+    - This wrapper avoids all v1 (mmcv 1.x) APIs.
+    - Feature extraction tries `model.extract_feat(points, img_metas)` first,
+      then falls back to `model.extract_feat(points)` if needed.
     """
-    Build an SST-like LiDAR encoder from an MMDetection3D config and call it.
 
-    Init args (both styles accepted):
-      - config: str | dict | Config
-      - checkpoint: Optional[str]
-      - sst_config_path: Optional[str]   # alias for 'config'
-      - sst_ckpt_path: Optional[str]     # alias for 'checkpoint'
-      - init_weights: bool = True
-
-    Behavior:
-      - Uses mmengine registry when possible, legacy builder otherwise.
-      - Optionally loads a checkpoint.
-      - `extract_feat` / `forward` just delegate to the underlying model.
-    """
-
-    def __init__(self,
-                 config: Union[str, Dict[str, Any], Config, None] = None,
-                 checkpoint: Optional[str] = None,
-                 init_weights: bool = True,
-                 # Backward-compat aliases used by your caller
-                 sst_config_path: Optional[str] = None,
-                 sst_ckpt_path: Optional[str] = None,
-                 **_: Any):
+    def __init__(
+        self,
+        sst_config: Union[str, Dict[str, Any], Config],
+        clip_embedding_dim: int = 512,
+        checkpoint: Optional[str] = None,
+        pool_num_heads: int = 8,
+    ) -> None:
         super().__init__()
 
-        # Map aliases if provided
-        if sst_config_path is not None and config is None:
-            config = sst_config_path
-        if sst_ckpt_path is not None and checkpoint is None:
-            checkpoint = sst_ckpt_path
+        cfg = _as_config(sst_config)
+        self._sst = _build_model_v2(cfg)
+        _maybe_load_checkpoint(self._sst, checkpoint)
 
-        # Load config (string path / dict / Config)
-        if isinstance(config, str):
-            self.cfg: Config = Config.fromfile(config)
-        elif isinstance(config, dict):
-            self.cfg = Config(dict(config))
-        elif isinstance(config, Config):
-            self.cfg = config
-        else:
-            raise TypeError(
-                "LidarEncoderSST: 'config' (or 'sst_config_path') must be a str path, dict, or Config."
-            )
+        # Derive pooling dims from your config helper (kept as-is)
+        # Expecting square spatial grids: output_shape[0] == output_shape[1]
+        spacial_dim = int(sst_model_conf["backbone"]["output_shape"][0])
+        conv_out = int(sst_model_conf["backbone"]["conv_out_channel"])
 
-        # Build model
-        self.model = _build_model_from_cfg(
-            self.cfg.model,
-            train_cfg=self.cfg.get('train_cfg'),
-            test_cfg=self.cfg.get('test_cfg')
+        self._pooler = AttentionPool2d(
+            spacial_dim=spacial_dim,
+            embed_dim=clip_embedding_dim,
+            num_heads=pool_num_heads,
+            input_dim=conv_out,
         )
 
-        # Initialize weights if available (no-op for many MMDet3D models)
-        if init_weights and hasattr(self.model, 'init_weights'):
-            try:
-                self.model.init_weights()
-            except Exception:
-                pass
+    # ------------------------------ Forward ---------------------------------
 
-        # Load checkpoint if provided
-        if checkpoint:
-            _load_checkpoint_mmengine(self.model, checkpoint)
+    def extract_lidar_feat(
+        self,
+        point_cloud: Sequence[torch.Tensor],
+        img_metas: Optional[List[dict]] = None,
+    ) -> torch.Tensor:
+        """Extract raw grid features from the underlying SST model.
 
-    # -------------------------- Public API ---------------------------------
+        Args:
+            point_cloud: A sequence of point tensors (Ni x C, typically C in {3,4}).
+            img_metas: Optional metadata list for models that expect it.
 
-    def extract_feat(self, *args, **kwargs):
-        """Call through to the underlying model, preferring `extract_feat`."""
-        if hasattr(self.model, 'extract_feat'):
-            return self.model.extract_feat(*args, **kwargs)  # type: ignore
-        if hasattr(self.model, 'backbone'):
-            return self.model.backbone(*args, **kwargs)      # type: ignore
-        return self.model(*args, **kwargs)                   # type: ignore
-
-    def forward(self,
-                points,  # e.g., List[Tensor] with (Ni, C) point clouds
-                img_metas: Optional[List[dict]] = None,
-                *args, **kwargs):
+        Returns:
+            A single feature Tensor (B, C, H, W).
         """
-        Preserve original behavior:
-        - If you used `model.extract_feat(points, img_metas)`, keep doing that.
-        - Otherwise call `model(points, img_metas, ...)` directly.
+        # Try the common v2 signature first
+        try:
+            feats = self._sst.extract_feat(point_cloud, img_metas)  # type: ignore[arg-type]
+        except TypeError:
+            # Some models expose extract_feat(points) only
+            feats = self._sst.extract_feat(point_cloud)  # type: ignore[misc]
+        return _select_first_feature(feats)
+
+    def forward(
+        self,
+        point_cloud: Sequence[torch.Tensor],
+        no_pooling: bool = False,
+        return_attention: bool = False,
+        img_metas: Optional[List[dict]] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass.
+
+        Args:
+            point_cloud: List[List[float]]-like point tensors per batch item.
+            no_pooling: If True, bypass attention pooling and return the grid
+                        features directly.
+            return_attention: If True, also return the attention weights.
+            img_metas: Optional mmdet-style image meta.
+
+        Returns:
+            If return_attention is False: pooled features (B, D)
+            If return_attention is True: (pooled features (B, D), attn weights)
         """
-        if hasattr(self.model, 'extract_feat'):
-            try:
-                return self.model.extract_feat(points, img_metas, *args, **kwargs)  # type: ignore
-            except TypeError:
-                return self.model.extract_feat(points, *args, **kwargs)             # type: ignore
-        if hasattr(self.model, 'forward'):
-            return self.model(points, img_metas, *args, **kwargs)  # type: ignore
-        raise RuntimeError("Underlying model has no usable forward/extract path.")
+        lidar_feat = self.extract_lidar_feat(point_cloud, img_metas)  # (B, C, H, W)
+
+        # Attention pooling
+        pooled, attn = self._pooler(lidar_feat, no_pooling, return_attention)
+        if return_attention:
+            return pooled, attn
+        return pooled
 
 
-# ----------------------------------------------------------------------------
-# 4) (Optional) smoke test
-# ----------------------------------------------------------------------------
-if __name__ == '__main__':
+# -----------------------------------------------------------------------------
+# Smoke test
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
     import os
-    cfg_path = os.environ.get('SST_CFG', 'your_sst_config.py')
 
-    enc = LidarEncoderSST(sst_config_path=cfg_path, sst_ckpt_path=None)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    enc.to(device).eval()
+    # Example usage: set SST_CFG to your MMEngine config file
+    cfg_path = os.environ.get("SST_CFG", "sst_encoder_only.py")
 
-    dummy_points = [torch.zeros((10, 4), device=device)]
-    try:
-        out = enc.extract_feat(dummy_points, None)
-        if isinstance(out, (list, tuple)):
-            print('[sst] extract_feat returned list/tuple:',
-                  [getattr(x, 'shape', type(x)) for x in out])
-        elif isinstance(out, dict):
-            print('[sst] extract_feat returned dict keys:', list(out.keys()))
-        else:
-            print('[sst] extract_feat output:', getattr(out, 'shape', type(out)))
-    except Exception as e:
-        print('[sst] Smoke test warning:', repr(e))
+    encoder = LidarEncoderSST(cfg_path, clip_embedding_dim=512)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    encoder.to(device).eval()
+
+    # Create a fake batch of LiDAR points
+    batch_size = 2
+    points = [torch.rand(10000, 4, device=device) for _ in range(batch_size)]
+
+    with torch.no_grad():
+        pooled = encoder(points)  # (B, D)
+        print("pooled shape:", getattr(pooled, "shape", type(pooled)))
