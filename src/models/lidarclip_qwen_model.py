@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, CLIPImageProcessor, AutoModelForCausalLM, AutoTokenizer
 import sys
-import os``
+import os
 
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
 from .sst import LidarEncoderSST
