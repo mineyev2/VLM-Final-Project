@@ -80,41 +80,44 @@ def _build_model_v2(cfg: Config):
     except Exception as e:
         print(f"[LiDAR Encoder] Warning: Could not import mmdet3d.models: {e}")
 
-    m = cfg.model
+m = cfg.model
+    
+    # --- v1 -> v2 compatibility: Convert legacy voxel_layer to data_preprocessor.voxelize_cfg ---
+    if 'voxel_layer' in m:
+        print("[LiDAR Encoder] Converting legacy voxel_layer to data_preprocessor format...")
+        legacy_voxel = m.pop('voxel_layer')
+        dp = m.setdefault('data_preprocessor', dict(type='Det3DDataPreprocessor'))
+        vc = dp.setdefault('voxelize_cfg', {})
+        if isinstance(legacy_voxel, dict):
+            vc.update(legacy_voxel)
+        print("[LiDAR Encoder] Config converted to v2 format")
     
     # --- Strategy 1: Extract backbone if config is a full detector ---
     detector_types = ['VoxelNet', 'DynamicVoxelNet', 'PointVoxelNet', 'SECOND', 
                       'PV-RCNN', 'PartA2', 'PVT']
     
-    if m.get('type') in detector_types:
+    if m.get('type') in detector_types and 'backbone' in m:
         print(f"[LiDAR Encoder] Detected full detector config (type={m['type']})")
         print(f"[LiDAR Encoder] Extracting backbone for encoder-only use...")
         
-        if 'backbone' in m:
-            backbone_cfg = m['backbone']
-            backbone_type = backbone_cfg.get('type', 'unknown')
-            print(f"[LiDAR Encoder] Building backbone: {backbone_type}")
+        backbone_cfg = m['backbone']
+        backbone_type = backbone_cfg.get('type', 'unknown')
+        print(f"[LiDAR Encoder] Building backbone: {backbone_type}")
+        
+        try:
+            model = MMDET3D_MODELS.build(backbone_cfg)
+            print(f"[LiDAR Encoder] Successfully built backbone: {backbone_type}")
+            if hasattr(model, 'init_weights'):
+                try:
+                    model.init_weights()
+                except Exception:
+                    pass
+            model._backbone_cfg = backbone_cfg
+            return model
+        except Exception as e:
+            print(f"[LiDAR Encoder] Warning: Could not build backbone: {e}")
+            print(f"[LiDAR Encoder] Attempting full detector build...")
             
-            try:
-                model = MMDET3D_MODELS.build(backbone_cfg)
-                print(f"[LiDAR Encoder] Successfully built backbone: {backbone_type}")
-                
-                # Initialize weights if method exists
-                if hasattr(model, 'init_weights'):
-                    try:
-                        model.init_weights()
-                    except Exception:
-                        pass
-                
-                # Store backbone config for pooler setup
-                model._backbone_cfg = backbone_cfg
-                return model
-            except Exception as e:
-                print(f"[LiDAR Encoder] Warning: Could not build backbone: {e}")
-                print(f"[LiDAR Encoder] Attempting full detector build...")
-        else:
-            print(f"[LiDAR Encoder] Warning: No backbone config found in detector config")
-
     # --- Strategy 2: Build model directly (works for backbones/encoders configured directly) ---
     try:
         print(f"[LiDAR Encoder] Building model: {m.get('type', 'unknown')}")
