@@ -1,20 +1,18 @@
 # ============================================================================
-# sst.py  —  mmcv 2.x compatibility without changing your SST logic
+# sst.py  —  mmcv 2.x compatibility + minimal vector output for LidarCLIP
 #
-# What this does:
-#   1) Stubs mmcv._ext so old ops imports don't crash on mmcv>=2.0
-#   2) Uses mmengine.Config when available (mmcv.Config fallback)
-#   3) Builds models via the new mmdet3d registry (fallback to 1.x builder)
-#
-# What this does NOT do:
-#   - It does NOT change your model, add pooling layers, or alter outputs.
-#   - It does NOT import or rely on custom attention pooling modules.
-#
-# Drop this file in place of your original sst.py.
+# - Stubs mmcv._ext to avoid ModuleNotFoundError with mmcv>=2.0
+# - Uses mmengine.Config (fallback to mmcv.Config if needed)
+# - Builds models via new mmdet3d registry (fallback to legacy builder)
+# - Backward-compatible init args:
+#       sst_config_path (alias for `config`)
+#       sst_ckpt_path   (alias for `checkpoint`)
+# - forward(points) returns (features, None) where features is [B, clip_embedding_dim]
+#   using simple mean pooling and a lazy Linear projector if needed.
 # ============================================================================
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, Union, List, Tuple
 
 # ----------------------------------------------------------------------------
 # 1) mmcv._ext shim (prevents "ModuleNotFoundError: mmcv._ext" on mmcv>=2.0)
@@ -44,7 +42,7 @@ def _build_model_from_cfg(model_cfg: Dict[str, Any],
     Try MMDetection3D 2.x registry first, otherwise use legacy builder.
     """
     try:
-        from mmdet3d.registry import MODELS  # mmdet3d>=1.1.0 (new registry API)
+        from mmdet3d.registry import MODELS  # new registry API
         return MODELS.build(model_cfg)
     except Exception:
         # Legacy path for older MMDetection3D
@@ -52,7 +50,7 @@ def _build_model_from_cfg(model_cfg: Dict[str, Any],
         return legacy_build_model(model_cfg, train_cfg=train_cfg, test_cfg=test_cfg)
 
 # ----------------------------------------------------------------------------
-# 4) SST wrapper that keeps your original forward/extract logic intact
+# 4) SST wrapper (keeps your original logic; adds tiny pooling/projection)
 # ----------------------------------------------------------------------------
 import torch
 import torch.nn as nn
@@ -62,27 +60,38 @@ class LidarEncoderSST(nn.Module):
     """
     Thin wrapper around your SST config/model.
 
-    Usage:
-        # Option A: load from a python config file that defines `model = dict(...)`
-        enc = LidarEncoderSST(config="path/to/your_sst_config.py", checkpoint=None)
+    Accepted init args (both styles work):
+      - config: str | dict | Config         (preferred)
+      - checkpoint: Optional[str]
+      - clip_embedding_dim: Optional[int]   (target vector dim; e.g., CLIP hidden size)
+      - sst_config_path: Optional[str]      (alias for 'config')
+      - sst_ckpt_path: Optional[str]        (alias for 'checkpoint')
+      - init_weights: bool = True
 
-        # Option B: pass an existing Config/dict
-        cfg = Config.fromfile("path/to/your_sst_config.py")
-        enc = LidarEncoderSST(config=cfg)
-
-        enc.eval()
-        outputs = enc(points_list, img_metas=None)
-
-    Notes:
-      - We don't alter your outputs; forward returns whatever the underlying model returns.
-      - If your pipeline expects dataset dicts (e.g., voxelized batches), feed those instead.
+    We do NOT alter model internals; we only:
+      - call the underlying model/extract_feat,
+      - mean-pool to a vector if needed, and
+      - (lazily) project to `clip_embedding_dim` when provided.
+    forward(...) returns (features, None) for compatibility with callers that
+    expect `(features, attn_weights)`.
     """
 
     def __init__(self,
-                 config: Union[str, Dict[str, Any], Config],
+                 config: Union[str, Dict[str, Any], Config, None] = None,
                  checkpoint: Optional[str] = None,
-                 init_weights: bool = True):
+                 clip_embedding_dim: Optional[int] = None,
+                 init_weights: bool = True,
+                 # Backward-compat aliases expected by your caller:
+                 sst_config_path: Optional[str] = None,
+                 sst_ckpt_path: Optional[str] = None,
+                 **_: Any):
         super().__init__()
+
+        # Map aliases if provided
+        if sst_config_path is not None and config is None:
+            config = sst_config_path
+        if sst_ckpt_path is not None and checkpoint is None:
+            checkpoint = sst_ckpt_path
 
         # Load config (string path / dict / Config)
         if isinstance(config, str):
@@ -92,7 +101,9 @@ class LidarEncoderSST(nn.Module):
         elif isinstance(config, Config):
             self.cfg = config
         else:
-            raise TypeError(f"Unsupported config type: {type(config)}")
+            raise TypeError(
+                "LidarEncoderSST: 'config' (or 'sst_config_path') must be a str path, dict, or Config."
+            )
 
         # Build model from config
         self.model = _build_model_from_cfg(
@@ -112,6 +123,10 @@ class LidarEncoderSST(nn.Module):
         if checkpoint is not None:
             self._load_checkpoint(checkpoint)
 
+        # Target embedding dimension (e.g., CLIP ViT hidden size)
+        self.target_dim: Optional[int] = int(clip_embedding_dim) if clip_embedding_dim is not None else None
+        self.proj: Optional[nn.Linear] = None  # created lazily once we know src dim
+
     def _load_checkpoint(self, checkpoint: str):
         state = torch.load(checkpoint, map_location="cpu")
         state_dict = state.get("state_dict", state)
@@ -121,40 +136,107 @@ class LidarEncoderSST(nn.Module):
         if unexpected:
             print(f"[sst] Unexpected keys: {unexpected[:12]}{' ...' if len(unexpected) > 12 else ''}")
 
-    # -------------------------- Public API ---------------------------------
+    # -------------------------- Private helpers -----------------------------
+
+    def _call_extract_any(self, points, img_metas=None):
+        """
+        Keep original logic: if your underlying model exposes `extract_feat`,
+        call it; otherwise try backbone; else forward.
+        """
+        if hasattr(self.model, "extract_feat"):
+            try:
+                return self.model.extract_feat(points, img_metas)  # type: ignore
+            except TypeError:
+                return self.model.extract_feat(points)             # type: ignore
+        if hasattr(self.model, "backbone"):
+            return self.model.backbone(points)                     # type: ignore
+        return self.model(points)                                  # type: ignore
+
+    def _to_batch_tensor(self, feats: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize various shapes to (B, C) by mean pooling over non-(B,C) dims.
+        Supported:
+          - (B, C, H, W) -> mean over H, W
+          - (B, T, C)    -> mean over T
+          - (T, C)       -> add batch dim -> (1, C)
+          - (C,)         -> (1, C)
+        """
+        if feats.ndim == 4:
+            # (B, C, H, W)
+            return feats.mean(dim=(2, 3))
+        if feats.ndim == 3:
+            # could be (B, T, C) or (C, H, W) — assume (B, T, C) is most common
+            if feats.shape[0] >= 1 and feats.shape[-1] <= 4096:
+                # (B, T, C) -> mean over T
+                return feats.mean(dim=1)
+            # fallback: treat as (B, C, T) and mean over last dim
+            return feats.mean(dim=2)
+        if feats.ndim == 2:
+            # (T, C) -> add batch dim
+            return feats.mean(dim=0, keepdim=True)
+        if feats.ndim == 1:
+            # (C,) -> (1, C)
+            return feats.unsqueeze(0)
+        raise TypeError(f"Unexpected feature tensor shape: {feats.shape}")
+
+    def _maybe_project(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        If target_dim is set and differs from current dim, lazily create a projector.
+        """
+        if self.target_dim is None:
+            return x
+        in_dim = x.shape[-1]
+        if in_dim == self.target_dim:
+            return x
+        if self.proj is None:
+            self.proj = nn.Linear(in_dim, self.target_dim, bias=True)
+        return self.proj(x)
+
+    # -------------------------- Public API ----------------------------------
 
     def extract_feat(self, *args, **kwargs):
         """
-        Keep original logic: if your underlying model exposes `extract_feat`,
-        we call that directly; otherwise we try falling back to backbone/forward.
+        Expose extract_feat for callers that want raw model outputs.
         """
-        if hasattr(self.model, "extract_feat"):
-            return self.model.extract_feat(*args, **kwargs)  # type: ignore
-        if hasattr(self.model, "backbone"):
-            return self.model.backbone(*args, **kwargs)      # type: ignore
-        return self.model(*args, **kwargs)                   # type: ignore
+        return self._call_extract_any(*args, **kwargs)
 
     def forward(self,
                 points: Union[List[torch.Tensor], Any],
                 img_metas: Optional[List[dict]] = None,
-                *args, **kwargs):
+                *args, **kwargs) -> Tuple[torch.Tensor, None]:
         """
-        Keep your original forward behavior:
-        - If your code used `model.extract_feat(points, img_metas)`, keep using it.
-        - Otherwise, call model directly.
+        Preserve original call pattern but return a vector per sample:
 
-        You decide at call-site whether you want features or full detection heads.
+        Returns:
+          (features, None)
+            features: [B, clip_embedding_dim] if `clip_embedding_dim` was set,
+                      otherwise [B, C] from pooled model output.
+            None: attention weights placeholder for compatibility.
         """
-        # Try common call signatures in order, without changing your logic:
-        if hasattr(self.model, "extract_feat"):
-            try:
-                return self.model.extract_feat(points, img_metas, *args, **kwargs)  # type: ignore
-            except TypeError:
-                return self.model.extract_feat(points, *args, **kwargs)             # type: ignore
-        # Fallbacks
-        if hasattr(self.model, "forward"):
-            return self.model(points, img_metas, *args, **kwargs)  # type: ignore
-        raise RuntimeError("Underlying model has no usable forward/extract path.")
+        feats = self._call_extract_any(points, img_metas)
+
+        # If the model returns a list/tuple/dict, pick a sensible tensor
+        if isinstance(feats, (list, tuple)):
+            feats = feats[0]
+        elif isinstance(feats, dict):
+            for key in ("feat", "feats", "x", "out", "neck_out"):
+                if key in feats and isinstance(feats[key], torch.Tensor):
+                    feats = feats[key]
+                    break
+            if isinstance(feats, dict):
+                # still a dict — can't use
+                raise TypeError(f"Unexpected feature dict keys: {list(feats.keys())}")
+
+        if not isinstance(feats, torch.Tensor):
+            raise TypeError(f"Unexpected feature type: {type(feats)}")
+
+        # Mean-pool to (B, C)
+        vec = self._to_batch_tensor(feats)
+        # Optionally project to requested dim (e.g., CLIP hidden size)
+        vec = self._maybe_project(vec)
+
+        # Return attention placeholder as None (your caller expects a 2-tuple)
+        return vec, None
 
 
 # ----------------------------------------------------------------------------
@@ -163,22 +245,14 @@ class LidarEncoderSST(nn.Module):
 if __name__ == "__main__":
     import os
 
-    # Example: load from a config file that defines `model = dict(...)`
-    # The uploaded companion config is a classic dict-style SST setup. :contentReference[oaicite:2]{index=2}
     cfg_path = os.environ.get("SST_CFG", "your_sst_config.py")
-    enc = LidarEncoderSST(cfg_path, checkpoint=None)
+    enc = LidarEncoderSST(sst_config_path=cfg_path, clip_embedding_dim=768)
 
-    # If your pipeline takes a list of (N, 4) point clouds:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     enc.to(device).eval()
     dummy_points = [torch.zeros((50, 4), device=device)]
     try:
-        out = enc.extract_feat(dummy_points, None)
-        if isinstance(out, (list, tuple)):
-            print("[sst] extract_feat returned list/tuple with lengths:", [getattr(x, 'shape', type(x)) for x in out])
-        elif isinstance(out, dict):
-            print("[sst] extract_feat returned dict with keys:", list(out.keys()))
-        else:
-            print("[sst] extract_feat output shape/type:", getattr(out, "shape", type(out)))
+        feats, attn = enc(dummy_points, None)
+        print("[sst] vector shape:", tuple(feats.shape), "| attn:", attn)
     except Exception as e:
         print("[sst] Smoke test warning:", repr(e))
