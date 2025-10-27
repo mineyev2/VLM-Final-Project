@@ -1,1 +1,0 @@
-{"train_loss":0.21498325892857142,"_timestamp":1.7603805954051886e+09,"_step":250,"loss_plot":{"path":"media/images/loss_plot_250_8dec079cc9fa9bd36c61.png","format":"png","width":3572,"height":2368,"_type":"image-file","sha256":"8dec079cc9fa9bd36c61f80667d485cdcd4de65b3fae4aa37573199f1539634e","size":289641},"_wandb":{"runtime":5199},"_runtime":5199,"epoch":250}
