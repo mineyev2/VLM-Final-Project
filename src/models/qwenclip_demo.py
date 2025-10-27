@@ -64,6 +64,7 @@ class QwenCLIPDemo(BaseModel):
     def prompt(self, text=None, images=None, args=None):
         """
         For compatibility with OpenMR demo.
+<<<<<<< HEAD
         Generates and returns decoded text output from the model.
         """
         # The 'images' argument is a filepath string from the calling script
@@ -107,6 +108,15 @@ class QwenCLIPDemo(BaseModel):
             response = self.model.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         return response
+=======
+        Returns text output similar to Qwen25Model.prompt()
+        """
+        image_inputs = self.image_processor(images=images, return_tensors="pt").to(self.device)
+        input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(self.device)
+        logits = self.model(image_inputs['pixel_values'], input_ids)
+        # 这里只返回logits，你可以根据需求改成生成文字或坐标。
+        return logits
+>>>>>>> 842a159c097709f5e26e4c71953729fa747ff83f
 
     def describeScene(self, images, args=None):
         return self.prompt(text="Describe the driving scene from the images.", images=images)
@@ -123,7 +133,10 @@ class QwenCLIPDemo(BaseModel):
         Generate motion prediction using QwenCLIP model and multimodal reasoning.
         """
         # === Step 1. Scene/Object/Intent Reasoning ===
+<<<<<<< HEAD
         # These calls will now correctly return strings
+=======
+>>>>>>> 842a159c097709f5e26e4c71953729fa747ff83f
         scene_description = self.describeScene(images, args=args)
         object_description = self.describeObjects(images, args=args)
         intent_description = self.generateIntent(images, prev_intent=given_intent)
@@ -158,12 +171,20 @@ class QwenCLIPDemo(BaseModel):
         # === Step 4. Query Qwen model ===
         result = ""
         for attempt in range(3):
+<<<<<<< HEAD
             # This call will now return a string, resolving the error
             result = self.prompt(text=prompt, images=images, args=args)
             print(result)
+=======
+            result = self.prompt(text=prompt, images=images, args=args)
+>>>>>>> 842a159c097709f5e26e4c71953729fa747ff83f
             if not any(bad_word in result.lower() for bad_word in ["unable", "sorry"]) and "[" in result:
                 break
             print(f"[Retry {attempt+1}/3] Model response invalid, retrying...")
 
         # === Step 5. Return structured reasoning results ===
         return result, scene_description, object_description, intent_description
+<<<<<<< HEAD
+=======
+
+>>>>>>> 842a159c097709f5e26e4c71953729fa747ff83f
