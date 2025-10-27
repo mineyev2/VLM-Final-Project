@@ -14,6 +14,8 @@ class LidarCLIPQwenModel(nn.Module):
     - Qwen LLM backbone
     - CLIP vision encoder with MLP projection
     - LiDAR SST encoder with AttentionPool2d and MLP projection
+    
+    This version is optimized for mmdet3d >= 1.0 (uses mmengine.Config)
     """
 
     def __init__(
@@ -22,82 +24,132 @@ class LidarCLIPQwenModel(nn.Module):
         qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
         clip_model_name="openai/clip-vit-large-patch14",
         lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
-        lidarclip_checkpoint_path=None,   # Path to pretrained LiDAR encoder weights (optional)
+        lidarclip_checkpoint_path=None,
         freeze_encoders=True,
         freeze_llm=True,
     ):
         super().__init__()
 
         self.device = device
-        print(f"Using device {self.device} for LidarCLIPQwenModel.")
+        print(f"\n{'='*70}")
+        print(f"Initializing LidarCLIPQwenModel on device: {self.device}")
+        print(f"{'='*70}\n")
 
         # ================================
         # 1) Vision Encoder (CLIP)
         # ================================
-        print("Loading CLIP vision model...")
-        self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
-        self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
-        clip_hidden_size = self.vision_tower.config.hidden_size  # ViT-L/14 -> 1024 or 768 depending on variant
+        print("[1/4] Loading CLIP vision model...")
+        try:
+            self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
+            self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
+            clip_hidden_size = self.vision_tower.config.hidden_size
+            print(f"      ✓ CLIP loaded. Hidden size: {clip_hidden_size}")
+        except Exception as e:
+            print(f"      ✗ Failed to load CLIP: {e}")
+            raise
 
         # ================================
         # 2) LiDAR Encoder (SST wrapper)
         # ================================
-        print("Loading LidarCLIP encoder...")
-        # Use the new LidarEncoderSST API (no legacy kwargs)
-        self.lidar_encoder = LidarEncoderSST(
-            sst_config=lidarclip_config_path,
-            clip_embedding_dim=clip_hidden_size,
-            checkpoint=lidarclip_checkpoint_path,
-        ).to(self.device)
+        print("\n[2/4] Loading LiDAR encoder (SST)...")
+        try:
+            # Verify config path exists
+            if isinstance(lidarclip_config_path, str) and not os.path.isfile(lidarclip_config_path):
+                print(f"      Warning: Config path does not exist: {lidarclip_config_path}")
+                print(f"      Will attempt to load anyway (may fail if path is required)...")
+            
+            self.lidar_encoder = LidarEncoderSST(
+                sst_config=lidarclip_config_path,
+                clip_embedding_dim=clip_hidden_size,
+                checkpoint=lidarclip_checkpoint_path,
+            ).to(self.device)
+            print(f"      ✓ SST encoder loaded successfully")
+        except KeyError as e:
+            print(f"      ✗ Model registration error in SST:")
+            print(f"         {e}")
+            print(f"\n      Troubleshooting:")
+            print(f"      • Check that mmdet3d >= 1.0 is installed")
+            print(f"      • Ensure SST model is in your mmdet3d installation")
+            print(f"      • Verify config file: {lidarclip_config_path}")
+            raise
+        except Exception as e:
+            print(f"      ✗ Failed to load SST encoder: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
         # ================================
         # 3) Language Model (Qwen)
         # ================================
-        print(f"Loading Qwen language model: {qwen_model_name}...")
-        self.language_model = AutoModelForCausalLM.from_pretrained(
-            qwen_model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",   # allow HF to shard if multiple GPUs exist
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
+        print("\n[3/4] Loading Qwen language model...")
+        try:
+            self.language_model = AutoModelForCausalLM.from_pretrained(
+                qwen_model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+            self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
+            qwen_hidden_size = self.language_model.config.hidden_size
+            print(f"      ✓ Qwen loaded. Hidden size: {qwen_hidden_size}")
+        except Exception as e:
+            print(f"      ✗ Failed to load Qwen: {e}")
+            raise
 
-        qwen_hidden_size = self.language_model.config.hidden_size
-        lidar_output_size = clip_hidden_size  # by construction, SST -> AttentionPool -> CLIP-dim
+        lidar_output_size = clip_hidden_size  # By construction: SST -> AttentionPool -> CLIP-dim
 
         # ================================
         # 4) Projectors (to Qwen hidden)
         # ================================
-        proj_w = qwen_hidden_size * 4
-        self.vision_projector = nn.Sequential(
-            nn.Linear(clip_hidden_size, proj_w),
-            nn.GELU(),
-            nn.Linear(proj_w, proj_w),
-            nn.GELU(),
-            nn.Linear(proj_w, qwen_hidden_size),
-        ).to(self.device).to(self.language_model.dtype)
+        print("\n[4/4] Setting up projection layers...")
+        try:
+            proj_w = qwen_hidden_size * 4
+            
+            self.vision_projector = nn.Sequential(
+                nn.Linear(clip_hidden_size, proj_w),
+                nn.GELU(),
+                nn.Linear(proj_w, proj_w),
+                nn.GELU(),
+                nn.Linear(proj_w, qwen_hidden_size),
+            ).to(self.device).to(self.language_model.dtype)
 
-        self.lidar_projector = nn.Sequential(
-            nn.Linear(lidar_output_size, proj_w),
-            nn.GELU(),
-            nn.Linear(proj_w, proj_w),
-            nn.GELU(),
-            nn.Linear(proj_w, qwen_hidden_size),
-        ).to(self.device).to(self.language_model.dtype)
+            self.lidar_projector = nn.Sequential(
+                nn.Linear(lidar_output_size, proj_w),
+                nn.GELU(),
+                nn.Linear(proj_w, proj_w),
+                nn.GELU(),
+                nn.Linear(proj_w, qwen_hidden_size),
+            ).to(self.device).to(self.language_model.dtype)
+            
+            print(f"      ✓ Projectors initialized")
+            print(f"        Vision: {clip_hidden_size} → {proj_w} → {qwen_hidden_size}")
+            print(f"        LiDAR:  {lidar_output_size} → {proj_w} → {qwen_hidden_size}")
+        except Exception as e:
+            print(f"      ✗ Failed to setup projectors: {e}")
+            raise
 
         # ================================
         # 5) Freezing strategy
         # ================================
+        print("\n[Freezing] Applying freeze strategy...")
         if freeze_encoders:
-            print("Freezing vision and LiDAR encoders...")
+            print("      Freezing vision and LiDAR encoders")
             self.vision_tower.requires_grad_(False)
             self.lidar_encoder.requires_grad_(False)
+        else:
+            print("      Vision and LiDAR encoders are TRAINABLE")
 
         if freeze_llm:
-            print("Freezing language model...")
+            print("      Freezing language model")
             self.language_model.requires_grad_(False)
+        else:
+            print("      Language model is TRAINABLE")
+
+        print(f"\n{'='*70}")
+        print("Model initialization complete!")
+        print(f"{'='*70}\n")
 
         # ================================
-        # 6) Prompt bits (kept as-is)
+        # 6) Prompt template
         # ================================
         self.vision_token = "<vision>"
         self.lidar_token = "<lidar>"
@@ -112,20 +164,31 @@ class LidarCLIPQwenModel(nn.Module):
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
         )
 
-    # ----------------------------------------------------------------------
+    # =========================================================================
 
     def forward(
         self,
-        images=None,            # [B, 3, H, W] preprocessed tensor
-        point_clouds=None,      # list of length B, each (N_i, 4) tensor
-        input_ids=None,         # [B, L] token ids
+        images=None,
+        point_clouds=None,
+        input_ids=None,
         use_vision=True,
         use_lidar=True,
-        return_features=False,  # if True, return {vision, lidar} features and attn
+        return_features=False,
     ):
         """
+        Forward pass for the multimodal model.
+        
+        Args:
+            images: [B, 3, H, W] preprocessed tensor (optional)
+            point_clouds: list of length B, each (N_i, 4) tensor (optional)
+            input_ids: [B, L] token ids (required)
+            use_vision: bool, whether to include vision features
+            use_lidar: bool, whether to include LiDAR features
+            return_features: bool, if True return feature dict alongside logits
+            
         Returns:
-            logits  (and optionally features dict)
+            logits: [B, L, V] model logits
+            features_dict: (optional) dict with 'vision', 'lidar', etc.
         """
         # Ensure input_ids is [B, L]
         if input_ids is not None and input_ids.dim() == 1:
@@ -135,9 +198,8 @@ class LidarCLIPQwenModel(nn.Module):
         features_dict = {}
         multimodal_embeddings = []
 
-        # ---------------- Vision ----------------
+        # -------- Vision --------
         if use_vision and images is not None:
-            # CLIP forward: returns last_hidden_state [B, P, C]
             with torch.no_grad() if not self.vision_tower.training else torch.enable_grad():
                 vision_outputs = self.vision_tower(pixel_values=images.to(self.device))
                 vision_features = vision_outputs.last_hidden_state  # [B, P, C]
@@ -147,13 +209,11 @@ class LidarCLIPQwenModel(nn.Module):
             multimodal_embeddings.append(projected_vision)
 
             if return_features:
-                # Global mean for a compact summary
                 features_dict['vision'] = vision_features.mean(dim=1).to(dtype)
 
-        # ---------------- LiDAR -----------------
+        # -------- LiDAR ---------
         if use_lidar and point_clouds is not None:
             with torch.no_grad() if not self.lidar_encoder.training else torch.enable_grad():
-                # Ask for attention only if user requested features
                 if return_features:
                     lidar_features, attn_weights = self.lidar_encoder(
                         point_clouds, return_attention=True
@@ -162,7 +222,7 @@ class LidarCLIPQwenModel(nn.Module):
                     lidar_features = self.lidar_encoder(point_clouds)  # (B, D)
                     attn_weights = None
 
-            # Match the sequence shape: add a single \"token\" for LiDAR
+            # Match sequence shape: add single "token" for LiDAR
             lidar_features = lidar_features.unsqueeze(1)  # [B, 1, D]
             projected_lidar = self.lidar_projector(lidar_features.to(dtype))
             multimodal_embeddings.append(projected_lidar)
@@ -172,13 +232,13 @@ class LidarCLIPQwenModel(nn.Module):
                 if attn_weights is not None:
                     features_dict['lidar_attention'] = attn_weights
 
-        # ---------------- Text ------------------
+        # -------- Text ----------
         if input_ids is None:
             raise ValueError("input_ids must be provided for language modeling.")
         text_embeddings = self.language_model.get_input_embeddings()(input_ids.to(self.device))
         text_embeddings = text_embeddings.to(dtype)
 
-        # ------------- Fuse & Decode ------------
+        # ------ Fuse & Decode -----
         if multimodal_embeddings:
             multimodal_embeds = torch.cat(multimodal_embeddings, dim=1)  # [B, M, H]
             combined_embeddings = torch.cat([multimodal_embeds, text_embeddings], dim=1)  # [B, M+L, H]
@@ -195,7 +255,7 @@ class LidarCLIPQwenModel(nn.Module):
             return outputs.logits, features_dict
         return outputs.logits
 
-    # ----------------------------------------------------------------------
+    # =========================================================================
 
     def prepare_inputs(
         self,
@@ -206,7 +266,10 @@ class LidarCLIPQwenModel(nn.Module):
         use_lidar=True,
     ):
         """
-        Prepare & move inputs to device. Returns a dict for forward().
+        Prepare & move inputs to device.
+        
+        Returns:
+            dict with keys: 'images', 'point_clouds', 'input_ids', 'use_vision', 'use_lidar'
         """
         prepared = {}
 
@@ -230,16 +293,16 @@ class LidarCLIPQwenModel(nn.Module):
             positions=positions_str,
         )
         text_inputs = self.tokenizer(prompt, return_tensors="pt")
-        prepared['input_ids'] = text_inputs['input_ids'].to(self.device)  # [1, L]
+        prepared['input_ids'] = text_inputs['input_ids'].to(self.device)
 
         prepared['use_vision'] = use_vision
         prepared['use_lidar'] = use_lidar
         return prepared
 
-    # ----------------------------------------------------------------------
+    # =========================================================================
 
     def get_trainable_parameters(self):
-        """Return list of params to optimize (projectors + any unfrozen blocks)."""
+        """Return list of parameters to optimize."""
         params = []
         params.extend(self.vision_projector.parameters())
         params.extend(self.lidar_projector.parameters())
@@ -253,6 +316,7 @@ class LidarCLIPQwenModel(nn.Module):
         return list(params)
 
     def save_projectors(self, save_path):
+        """Save projection layer weights."""
         torch.save(
             {
                 'vision_projector': self.vision_projector.state_dict(),
@@ -263,39 +327,56 @@ class LidarCLIPQwenModel(nn.Module):
         print(f"Saved projectors to {save_path}")
 
     def load_projectors(self, load_path):
+        """Load projection layer weights."""
         ckpt = torch.load(load_path, map_location=self.device)
         self.vision_projector.load_state_dict(ckpt['vision_projector'])
         self.lidar_projector.load_state_dict(ckpt['lidar_projector'])
         print(f"Loaded projectors from {load_path}")
 
 
-# Example (optional)
+# ============================================================================
+# Example usage and testing
+# ============================================================================
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = LidarCLIPQwenModel(
-        device=device,
-        qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
-        clip_model_name="openai/clip-vit-large-patch14",
-        lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
-        lidarclip_checkpoint_path=None,  # or path to .pth
-        freeze_encoders=True,
-        freeze_llm=True,
-    )
+    
+    print("Testing LidarCLIPQwenModel initialization...")
+    print(f"Device: {device}\n")
+    
+    try:
+        model = LidarCLIPQwenModel(
+            device=device,
+            qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
+            clip_model_name="openai/clip-vit-large-patch14",
+            lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
+            lidarclip_checkpoint_path=None,
+            freeze_encoders=True,
+            freeze_llm=True,
+        )
 
-    B = 2
-    dummy_images = torch.randn(B, 3, 224, 224).to(device)
-    dummy_point_clouds = [torch.randn(1000, 4).to(device) for _ in range(B)]
-    dummy_positions = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
+        B = 2
+        dummy_images = torch.randn(B, 3, 224, 224).to(device)
+        dummy_point_clouds = [torch.randn(1000, 4).to(device) for _ in range(B)]
+        dummy_positions = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
 
-    inputs = model.prepare_inputs(
-        images=dummy_images,
-        point_clouds=dummy_point_clouds,
-        ego_positions=dummy_positions,
-        use_vision=True,
-        use_lidar=True,
-    )
-    # Forward
-    logits, feats = model(return_features=True, **inputs)
-    print("logits:", logits.shape)
-    print("vision summary:", feats['vision'].shape if 'vision' in feats else None)
-    print("lidar summary:", feats['lidar'].shape if 'lidar' in feats else None)
+        print("Preparing inputs...")
+        inputs = model.prepare_inputs(
+            images=dummy_images,
+            point_clouds=dummy_point_clouds,
+            ego_positions=dummy_positions,
+            use_vision=True,
+            use_lidar=True,
+        )
+        
+        print("Running forward pass...")
+        logits, feats = model(return_features=True, **inputs)
+        
+        print(f"\n✓ Forward pass successful!")
+        print(f"  Logits shape: {logits.shape}")
+        print(f"  Vision features shape: {feats['vision'].shape if 'vision' in feats else 'N/A'}")
+        print(f"  LiDAR features shape: {feats['lidar'].shape if 'lidar' in feats else 'N/A'}")
+        
+    except Exception as e:
+        print(f"\n✗ Error: {e}")
+        import traceback
+        traceback.print_exc()

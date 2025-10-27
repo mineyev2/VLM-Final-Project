@@ -1,18 +1,15 @@
 # =============================================================================
-# sst.py — OpenMMLab v2 (MMEngine/MMCV2/mmdet3d>=1.0) compatible SST wrapper
+# sst.py – OpenMMLab v2 (MMEngine/MMCV2/mmdet3d>=1.0) compatible SST wrapper
 # =============================================================================
-# Key changes vs. legacy code:
-#   1) Uses mmengine.Config (NOT mmcv.Config) and the v2 registry build path:
-#        from mmdet3d.registry import MODELS
-#        model = MODELS.build(cfg.model)
-#   2) Initializes default scope ('mmdet3d') so registries resolve correctly.
-#   3) Robust feature extraction: handles list/tuple/dict/Tensor returns.
-#   4) Optional checkpoint loading via mmengine.runner.load_checkpoint.
-#   5) Keeps your AttentionPool2d integration unchanged.
+# Fixed for new mmdet3d versions with proper:
+#   1) Model registry imports to ensure custom models like SSTv2 are registered
+#   2) Backbone extraction for encoder-only use (avoids full detector init)
+#   3) Fallback handling for config variations
 #
-# This file intentionally avoids v1-era APIs such as:
-#   - from mmcv import Config
-#   - from mmdet3d.models import build_model
+# This file uses:
+#   - mmengine.Config for configuration
+#   - mmdet3d.registry.MODELS for model building
+#   - No legacy v1 APIs (mmcv.Config, mmdet3d.models.build_model)
 # =============================================================================
 
 from __future__ import annotations
@@ -63,49 +60,132 @@ def _as_config(cfg_like: Union[str, Dict[str, Any], Config]) -> Config:
     )
 
 def _build_model_v2(cfg: Config):
-    """Build an MMDetection3D model using the v2 registry.
+    """Build an MMDetection3D model using the v2 registry (mmdet3d >= 1.0).
 
-    - Auto-converts legacy v1 keys (e.g., `voxel_layer`) into the v2 location
-      under `data_preprocessor.voxelize_cfg`.
+    Strategy for handling new mmdet3d versions:
+    1. Initialize registry scope to resolve custom models
+    2. Import mmdet3d models to trigger registration of all custom types (SSTv2, etc)
+    3. Extract backbone if full detector config is provided (for encoder-only use)
+    4. Build backbone directly, falling back to full detector if needed
+    
+    This approach avoids:
+    - "not in registry" errors by pre-registering custom models
+    - Full detector initialization overhead (unnecessary for feature extraction)
+    - v1 API compatibility issues
     """
+    # Initialize the registry scope
     try:
         init_default_scope('mmdet3d')
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Warning: Could not init default scope: {e}")
 
-    # --- Begin v1 -> v2 compatibility shim ---
+    # --- Critical: Import mmdet3d.models to register all custom model types ---
+    # This ensures SSTv2, SECOND, DynamicVoxelNet, and other custom backbones
+    # are registered before we try to build them
+    try:
+        import mmdet3d.models  # noqa: F401
+        from mmdet3d.models import *  # noqa: F401, F403
+    except Exception as e:
+        print(f"Warning: Could not import mmdet3d.models: {e}")
+        print("Continuing anyway, but custom models may not be registered...")
+
     m = cfg.model
-    # Old configs sometimes have voxelization at the top-level
-    for legacy_key in ("voxel_layer", "pts_voxel_layer"):
-        if legacy_key in m:
-            legacy_voxel = m.pop(legacy_key)
-            dp = m.setdefault("data_preprocessor", dict(type="Det3DDataPreprocessor"))
-            vc = dp.setdefault("voxelize_cfg", {})
-            # Prefer explicit values from the legacy block
-            if isinstance(legacy_voxel, dict):
-                vc.update(legacy_voxel)
-    # --- End shim ---
+    
+    # --- Strategy 1: Extract backbone if config is a full detector ---
+    # Many older configs build full detectors (VoxelNet, DynamicVoxelNet, etc.)
+    # but we only need the backbone/encoder for feature extraction
+    detector_types = ['VoxelNet', 'DynamicVoxelNet', 'PointVoxelNet', 'SECOND', 
+                      'PV-RCNN', 'PartA2', 'PVT']
+    
+    if m.get('type') in detector_types:
+        print(f"[LiDAR Encoder] Detected full detector config (type={m['type']})")
+        print(f"[LiDAR Encoder] Extracting backbone for encoder-only feature extraction...")
+        
+        if 'backbone' in m:
+            backbone_cfg = m['backbone']
+            backbone_type = backbone_cfg.get('type', 'unknown')
+            print(f"[LiDAR Encoder] Building backbone: {backbone_type}")
+            
+            try:
+                model = MMDET3D_MODELS.build(backbone_cfg)
+                print(f"[LiDAR Encoder] Successfully built backbone: {backbone_type}")
+                
+                # Initialize weights if method exists
+                if hasattr(model, 'init_weights'):
+                    try:
+                        model.init_weights()
+                    except Exception:
+                        pass
+                return model
+            except Exception as e:
+                print(f"[LiDAR Encoder] Warning: Could not build backbone: {e}")
+                print(f"[LiDAR Encoder] Attempting full detector build (may fail if dependencies missing)...")
+        else:
+            print(f"[LiDAR Encoder] Warning: No backbone config found in detector config")
 
-    model = MMDET3D_MODELS.build(m)
-
-    if hasattr(model, 'init_weights'):
-        try:
-            model.init_weights()
-        except Exception:
-            pass
-
-    return model
+    # --- Strategy 2: Build model directly (works for backbones/encoders configured directly) ---
+    try:
+        print(f"[LiDAR Encoder] Building model: {m.get('type', 'unknown')}")
+        model = MMDET3D_MODELS.build(m)
+        print(f"[LiDAR Encoder] Successfully built model: {m.get('type', 'unknown')}")
+        
+        if hasattr(model, 'init_weights'):
+            try:
+                model.init_weights()
+            except Exception:
+                pass
+        return model
+        
+    except KeyError as e:
+        error_msg = str(e)
+        if "not in the mmdet3d::model registry" in error_msg or "not in the mmdet3d::MODELS registry" in error_msg:
+            print("\n" + "="*70)
+            print("[ERROR] Model Registration Failed")
+            print("="*70)
+            print(f"Error: {error_msg}\n")
+            print("This error occurs when a model type (like SSTv2) is not registered.")
+            print("Possible causes and solutions:")
+            print("  1. Custom model not installed: mmdet3d may not include SSTv2")
+            print("     → Install mmdet3d with custom models or verify installation")
+            print("  2. Model not imported before build: verify imports in this file")
+            print("  3. Config specifies wrong model type: check sst_encoder_only_config.py")
+            print("  4. mmdet3d version mismatch: ensure you're using mmdet3d>=1.0")
+            print("\nConfig model section:")
+            print(f"  type: {m.get('type')}")
+            print(f"  keys: {list(m.keys())}")
+            print("="*70 + "\n")
+            raise KeyError(
+                f"Model registration failed. See details above. Original error: {e}"
+            ) from e
+        raise
 
 def _maybe_load_checkpoint(model: nn.Module, checkpoint: Optional[str]) -> None:
+    """Load checkpoint weights into model (with fallback for different formats)."""
     if not checkpoint:
         return
+    
+    print(f"[LiDAR Encoder] Loading checkpoint: {checkpoint}")
+    
     if load_checkpoint is None:
-        # Fallback: torch.load state_dict (best-effort)
+        # Fallback: use torch.load for state_dict
+        print("[LiDAR Encoder] Using torch.load fallback for checkpoint...")
         state = torch.load(checkpoint, map_location='cpu')
         state_dict = state.get('state_dict', state)
         model.load_state_dict(state_dict, strict=False)
+        print("[LiDAR Encoder] Checkpoint loaded (non-strict)")
         return
-    load_checkpoint(model, checkpoint, map_location='cpu')
+    
+    # Use mmengine's checkpoint loader
+    try:
+        load_checkpoint(model, checkpoint, map_location='cpu')
+        print("[LiDAR Encoder] Checkpoint loaded via mmengine")
+    except Exception as e:
+        print(f"[LiDAR Encoder] Warning: mmengine checkpoint load failed: {e}")
+        print("[LiDAR Encoder] Attempting torch.load fallback...")
+        state = torch.load(checkpoint, map_location='cpu')
+        state_dict = state.get('state_dict', state)
+        model.load_state_dict(state_dict, strict=False)
+        print("[LiDAR Encoder] Checkpoint loaded via torch.load fallback")
 
 
 def _select_first_feature(feats: Any) -> torch.Tensor:
@@ -133,7 +213,7 @@ def _select_first_feature(feats: Any) -> torch.Tensor:
 # -----------------------------------------------------------------------------
 
 class LidarEncoderSST(nn.Module):
-    """SST-based LiDAR encoder (OpenMMLab v2 compatible).
+    """SST-based LiDAR encoder (OpenMMLab v2 compatible, mmdet3d >= 1.0).
 
     Parameters
     ----------
@@ -149,9 +229,10 @@ class LidarEncoderSST(nn.Module):
 
     Notes
     -----
-    - This wrapper avoids all v1 (mmcv 1.x) APIs.
+    - This wrapper is compatible with mmdet3d >= 1.0 (uses mmengine.Config)
     - Feature extraction tries `model.extract_feat(points, img_metas)` first,
       then falls back to `model.extract_feat(points)` if needed.
+    - Backbone is extracted from full detector configs for encoder-only use.
     """
 
     def __init__(
@@ -163,14 +244,25 @@ class LidarEncoderSST(nn.Module):
     ) -> None:
         super().__init__()
 
+        print("[LiDAR Encoder] Initializing LidarEncoderSST...")
         cfg = _as_config(sst_config)
+        
+        print("[LiDAR Encoder] Building SST model...")
         self._sst = _build_model_v2(cfg)
+        
+        print("[LiDAR Encoder] Loading checkpoint (if provided)...")
         _maybe_load_checkpoint(self._sst, checkpoint)
 
-        # Derive pooling dims from your config helper (kept as-is)
+        # Derive pooling dimensions from your config helper
         # Expecting square spatial grids: output_shape[0] == output_shape[1]
         spacial_dim = int(sst_model_conf["backbone"]["output_shape"][0])
         conv_out = int(sst_model_conf["backbone"]["conv_out_channel"])
+
+        print(f"[LiDAR Encoder] Setting up attention pooler:")
+        print(f"  spatial_dim: {spacial_dim}")
+        print(f"  input_dim (conv_out): {conv_out}")
+        print(f"  embedding_dim: {clip_embedding_dim}")
+        print(f"  num_heads: {pool_num_heads}")
 
         self._pooler = AttentionPool2d(
             spacial_dim=spacial_dim,
@@ -210,14 +302,14 @@ class LidarEncoderSST(nn.Module):
         return_attention: bool = False,
         img_metas: Optional[List[dict]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass.
+        """Forward pass: extract and pool LiDAR features.
 
         Args:
-            point_cloud: List[List[float]]-like point tensors per batch item.
-            no_pooling: If True, bypass attention pooling and return the grid
-                        features directly.
+            point_cloud: List of point tensors per batch item.
+            no_pooling: If True, bypass attention pooling and return grid
+                        features directly (B, C, H, W).
             return_attention: If True, also return the attention weights.
-            img_metas: Optional mmdet-style image meta.
+            img_metas: Optional mmdet-style image metadata.
 
         Returns:
             If return_attention is False: pooled features (B, D)
@@ -232,23 +324,43 @@ class LidarEncoderSST(nn.Module):
         return pooled
 
 
-# -----------------------------------------------------------------------------
-# Smoke test
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Quick test
+# =============================================================================
 if __name__ == "__main__":
     import os
 
-    # Example usage: set SST_CFG to your MMEngine config file
     cfg_path = os.environ.get("SST_CFG", "sst_encoder_only.py")
+    
+    print("="*70)
+    print("LidarEncoderSST Smoke Test (mmdet3d v2 compatible)")
+    print("="*70)
 
-    encoder = LidarEncoderSST(cfg_path, clip_embedding_dim=512)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    encoder.to(device).eval()
+    try:
+        encoder = LidarEncoderSST(cfg_path, clip_embedding_dim=512)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        encoder.to(device).eval()
 
-    # Create a fake batch of LiDAR points
-    batch_size = 2
-    points = [torch.rand(10000, 4, device=device) for _ in range(batch_size)]
+        batch_size = 2
+        points = [torch.rand(10000, 4, device=device) for _ in range(batch_size)]
 
-    with torch.no_grad():
-        pooled = encoder(points)  # (B, D)
-        print("pooled shape:", getattr(pooled, "shape", type(pooled)))
+        print("\nRunning forward pass...")
+        with torch.no_grad():
+            pooled = encoder(points)
+            print(f"✓ Pooled features shape: {pooled.shape}")
+            
+            pooled_with_attn, attn = encoder(points, return_attention=True)
+            print(f"✓ Attention weights shape: {attn.shape}")
+        
+        print("\n" + "="*70)
+        print("Success! LidarEncoderSST is working correctly.")
+        print("="*70)
+        
+    except Exception as e:
+        print(f"\n✗ Error during test: {e}")
+        print("\nDebugging tips:")
+        print("  1. Check that mmdet3d >= 1.0 is installed")
+        print("  2. Verify SST model is available in your mmdet3d installation")
+        print("  3. Check sst_encoder_only_config.py path and content")
+        import traceback
+        traceback.print_exc()
