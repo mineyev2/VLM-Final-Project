@@ -18,7 +18,7 @@ from scipy import interpolate
 import wandb
 
 # Import the new model class
-from lidarclip_qwen_model import LidarCLIPQwenModel  # Assuming you save it as a separate file
+from src.models.lidarclip_qwen_model import LidarCLIPQwenModel  # Assuming you save it as a separate file
 
 # Dataset
 from scripts.nuscenes_dataset import NuScenesDataset
