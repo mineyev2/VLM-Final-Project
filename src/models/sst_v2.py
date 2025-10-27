@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import copy
 from mmcv.cnn import build_conv_layer, build_norm_layer
-from mmdet3d.models.sst.sst_basic_block_v2 import BasicShiftBlockV2
+from .sst_basic_block_v2 import BasicShiftBlockV2
 
 from mmdet3d.ops import flat2window_v2, window2flat_v2
 

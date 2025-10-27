@@ -2,12 +2,11 @@
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-from mmcv.runner import auto_fp16
+
 from mmcv.cnn import build_norm_layer
 
 from mmdet3d.ops import flat2window_v2, window2flat_v2
 
-from ipdb import set_trace
 import os
 import pickle as pkl
 
@@ -87,7 +86,6 @@ class EncoderLayer(nn.Module):
         self.post_norm = layer_cfg.get('post_norm', True)
         self.fp16_enabled=False
 
-    @auto_fp16(apply_to=('src'))
     def forward(
         self,
         src,
