@@ -83,7 +83,7 @@ def create_model_and_tokenizer(args, device):
         device=device,
         qwen_model_name=args.llm_path,
         clip_model_name=args.image_encoder_path,
-        lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
+        lidarclip_config_path="src/models/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=args.lidar_encoder_path,
         freeze_encoders=not args.unfreeze_encoders,
         freeze_llm=not args.unfreeze_llm
