@@ -33,6 +33,7 @@ from llava.mm_utils import tokenizer_image_token, process_images, get_model_name
 from llava.conversation import conv_templates
 
 from models.qwen25_model import Qwen25Model
+from models.qwenclip_demo import QwenCLIPDemo
 
 OBS_LEN = 10
 FUT_LEN = 10
@@ -41,7 +42,7 @@ TTL_LEN = OBS_LEN + FUT_LEN
 def main():
     # Command line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="qwen25", help="Model type (currently only supports qwen25)")
+    parser.add_argument("--model", type=str, default="qwenclip", help="Model type (currently only supports qwen25)")
     parser.add_argument("--dataset", type=str, default="NuScenes", help="Dataset type (e.g., NuScenes)")
     parser.add_argument("--version", type=str, default='v1.0-mini', help="Version of dataset")
     parser.add_argument("--plot", type=bool, default=True)
@@ -66,6 +67,8 @@ def main():
         if "qwen25" in args.model:
                 base_model = Qwen25Model()
         # NOTE: Add any other models here, like LLM. Make sure to inherit from BaseModel class.
+        elif "qwenclip" in args.model:
+                base_model = QwenCLIPDemo()
         else:
             raise ValueError(colored(f"Model {args.model} not recognized.", "red"))
     
