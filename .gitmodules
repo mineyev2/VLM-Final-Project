@@ -1,0 +1,3 @@
+[submodule "lidarclip_repo"]
+	path = lidarclip_repo
+	url = https://github.com/atonderski/lidarclip.git
