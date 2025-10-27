@@ -66,6 +66,39 @@ def _as_config(cfg_like: Union[str, Dict[str, Any], Config]) -> Config:
 def _build_model_v2(cfg: Config):
     """Build an MMDetection3D model using the v2 registry.
 
+    - Auto-converts legacy v1 keys (e.g., `voxel_layer`) into the v2 location
+      under `data_preprocessor.voxelize_cfg`.
+    """
+    try:
+        init_default_scope('mmdet3d')
+    except Exception:
+        pass
+
+    # --- Begin v1 -> v2 compatibility shim ---
+    m = cfg.model
+    # Old configs sometimes have voxelization at the top-level
+    for legacy_key in ("voxel_layer", "pts_voxel_layer"):
+        if legacy_key in m:
+            legacy_voxel = m.pop(legacy_key)
+            dp = m.setdefault("data_preprocessor", dict(type="Det3DDataPreprocessor"))
+            vc = dp.setdefault("voxelize_cfg", {})
+            # Prefer explicit values from the legacy block
+            if isinstance(legacy_voxel, dict):
+                vc.update(legacy_voxel)
+    # --- End shim ---
+
+    model = MMDET3D_MODELS.build(m)
+
+    if hasattr(model, 'init_weights'):
+        try:
+            model.init_weights()
+        except Exception:
+            pass
+
+    return model
+
+    """Build an MMDetection3D model using the v2 registry.
+
     Notes:
         - We set default scope to 'mmdet3d' before building so that cross-package
           registries (backbone/neck/heads from mmdet, etc.) resolve correctly.
