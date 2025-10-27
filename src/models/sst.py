@@ -35,8 +35,8 @@ except Exception:  # pragma: no cover
     load_checkpoint = None  # type: ignore
 
 # Project-local imports
-from lidarclip.model.attention_pool import AttentionPool2d
-from lidarclip.model.sst_encoder_only_config import model as sst_model_conf
+from .attention_pool import AttentionPool2d
+from .sst_encoder_only_config import model as sst_model_conf
 
 
 # -----------------------------------------------------------------------------
