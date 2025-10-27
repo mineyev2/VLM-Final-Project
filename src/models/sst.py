@@ -1,3 +1,5 @@
+import sys
+import os
 from mmengine.config import Config
 from mmengine.registry import init_default_scope
 from mmdet3d.registry import MODELS as MMDET3D_MODELS
@@ -6,24 +8,18 @@ import torch
 from torch import nn
 
 from .attention_pool import AttentionPool2d
-
 from .sst_encoder_only_config import model as sst_model_conf
 
-# Add the cloned lidarclip repo to path so we can import its SST
-# Adjust the relative path based on where your lidarclip_repo folder is
+# Add the cloned lidarclip repo to sys.path
 lidarclip_sst_path = os.path.join(os.path.dirname(__file__), "../../lidarclip_repo/SST")
-if os.path.exists(lidarclip_sst_path):
-    sys.path.insert(0, lidarclip_sst_path)
-    from mmdet3d.models.backbones.sst_v2 import SSTv2
-else:
-    # Fallback to local version if cloned repo not found
-    print(f"Warning: lidarclip repo not found at {lidarclip_sst_path}")
-    from .sst_v2 import SSTv2
+sys.path.insert(0, lidarclip_sst_path)
+
+# Import SSTv2 from the cloned repo
+from mmdet3d.models.backbones.sst_v2 import SSTv2
 
 # Register SSTv2 if not already registered
 if 'SSTv2' not in MMDET3D_MODELS.module_dict:
     MMDET3D_MODELS.register_module()(SSTv2)
-
 
 class LidarEncoderSST(nn.Module):
     def __init__(self, sst_config, clip_embedding_dim=512, checkpoint=None):
