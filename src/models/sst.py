@@ -62,7 +62,6 @@ def _as_config(cfg_like: Union[str, Dict[str, Any], Config]) -> Config:
         "Config must be a path, dict, or mmengine.config.Config"
     )
 
-
 def _build_model_v2(cfg: Config):
     """Build an MMDetection3D model using the v2 registry.
 
@@ -96,32 +95,6 @@ def _build_model_v2(cfg: Config):
             pass
 
     return model
-
-    """Build an MMDetection3D model using the v2 registry.
-
-    Notes:
-        - We set default scope to 'mmdet3d' before building so that cross-package
-          registries (backbone/neck/heads from mmdet, etc.) resolve correctly.
-        - We do not pass train_cfg/test_cfg here; in v2 they live inside cfg.model.
-    """
-    try:
-        init_default_scope('mmdet3d')
-    except Exception:
-        # It's fine if the scope is already initialized or mmengine version differs
-        pass
-
-    model = MMDET3D_MODELS.build(cfg.model)
-
-    # Optional: some models keep init_weights; safe to call if present.
-    if hasattr(model, 'init_weights'):
-        try:
-            model.init_weights()
-        except Exception:
-            # Not all components implement it in v2
-            pass
-
-    return model
-
 
 def _maybe_load_checkpoint(model: nn.Module, checkpoint: Optional[str]) -> None:
     if not checkpoint:
