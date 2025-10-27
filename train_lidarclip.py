@@ -41,7 +41,7 @@ def parse_args():
     # Model paths
     parser.add_argument("--llm_path", type=str, default="Qwen/Qwen2-7B-Instruct", help="Qwen model id/path.")
     parser.add_argument("--image_encoder_path", type=str, default="openai/clip-vit-large-patch14", help="CLIP vision encoder id/path.")
-    parser.add_argument("--lidar_encoder_path", type=str, required=True, help="Path to pretrained LidarCLIP weights/checkpoint.")
+    parser.add_argument("--lidar_encoder_path", type=str, default="Lidar-CLIP/vit_l_14.ckpt", required=True, help="Path to pretrained LidarCLIP weights/checkpoint.")
 
     # Freezing policy
     parser.add_argument("--unfreeze-encoders", action="store_true",
