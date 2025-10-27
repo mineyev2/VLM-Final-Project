@@ -1,4 +1,4 @@
-from mmdet.models import BACKBONES
+from mmdet3d.registry import MODELS as BACKBONES
 
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
-@BACKBONES.register_module()
+@BACKBONES.register_module(module_name='SSTv2')
 class SSTv2(nn.Module):
     '''
     Single-stride Sparse Transformer. 
