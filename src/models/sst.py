@@ -1,3 +1,14 @@
+# ============================================================================
+# FIX: mmcv 2.0.0 + mmdet3d 1.4.0 compatibility
+# mmdet3d 1.4.0 expects mmcv._ext which was removed in mmcv 2.0.0
+# Create stub BEFORE any mmdet3d imports to prevent chain failure
+# ============================================================================
+import mmcv
+if not hasattr(mmcv, '_ext'):
+    class _ExtStub:
+        pass
+    mmcv._ext = _ExtStub()
+
 # 改动1：Config 改到 mmengine
 from mmengine.config import Config
 
