@@ -6,7 +6,7 @@ import os
 
 # Add LidarCLIP to path if needed
 sys.path.append('./lidarclip')
-from sst import LidarEncoderSST
+from .sst import LidarEncoderSST
 
 class LidarCLIPQwenModel(nn.Module):
     """
