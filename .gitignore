@@ -23,6 +23,7 @@ gpt_results/
 qwen_results/
 qwen25_results/
 experiments/runs/
+wandb/
 
 datasets/
 outputs/
