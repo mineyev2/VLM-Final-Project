@@ -11,17 +11,13 @@ from torch import nn
 from .attention_pool import AttentionPool2d
 from .sst_encoder_only_config import model as sst_model_conf
 
-# === Setup sys.path for entire cloned SST repo ===
+# Setup paths for all SST-related imports
 sst_repo_root = os.path.join(os.path.dirname(__file__), "../../lidarclip_repo/SST")
-
-# Add SST root FIRST so all internal mmdet3d imports resolve within the cloned repo
 sys.path.insert(0, sst_repo_root)
-
-# Also add mmdet3d submodules explicitly
-sys.path.insert(0, os.path.join(sst_repo_root, "mmdet3d/ops/sst"))
 sys.path.insert(0, os.path.join(sst_repo_root, "mmdet3d/models/sst"))
+sys.path.insert(0, os.path.join(sst_repo_root, "mmdet3d/ops/sst"))
 
-# Now load SSTv2 - all its internal imports should work
+# Load SSTv2 directly by file path
 sst_v2_path = os.path.join(sst_repo_root, "mmdet3d/models/backbones/sst_v2.py")
 spec = importlib.util.spec_from_file_location("sst_v2", sst_v2_path)
 sst_v2_module = importlib.util.module_from_spec(spec)
