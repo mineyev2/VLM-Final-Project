@@ -11,8 +11,12 @@ from torch import nn
 from .attention_pool import AttentionPool2d
 from .sst_encoder_only_config import model as sst_model_conf
 
-# Direct import from cloned lidarclip repo using importlib
-sst_v2_path = os.path.join(os.path.dirname(__file__), "../../lidarclip_repo/SST/mmdet3d/models/backbones/sst_v2.py")
+# Add the cloned SST repo to sys.path FIRST so relative imports work
+sst_repo_path = os.path.join(os.path.dirname(__file__), "../../lidarclip_repo/SST")
+sys.path.insert(0, sst_repo_path)
+
+# Now import SSTv2 using importlib
+sst_v2_path = os.path.join(sst_repo_path, "mmdet3d/models/backbones/sst_v2.py")
 
 spec = importlib.util.spec_from_file_location("sst_v2", sst_v2_path)
 sst_v2_module = importlib.util.module_from_spec(spec)
@@ -22,7 +26,6 @@ SSTv2 = sst_v2_module.SSTv2
 # Register SSTv2 if not already registered
 if 'SSTv2' not in MMDET3D_MODELS.module_dict:
     MMDET3D_MODELS.register_module()(SSTv2)
-
 
 class LidarEncoderSST(nn.Module):
     def __init__(self, sst_config, clip_embedding_dim=512, checkpoint=None):
