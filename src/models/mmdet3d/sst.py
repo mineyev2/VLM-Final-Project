@@ -8,8 +8,8 @@ from mmdet3d.registry import MODELS as MMDET3D_MODELS
 import torch
 from torch import nn
 
-from .attention_pool import AttentionPool2d
-from .sst_encoder_only_config import model as sst_model_conf
+#from .attention_pool import AttentionPool2d
+from configs.sst_encoder_only_config import model as sst_model_conf
 
 # Setup paths for all SST-related imports
 sst_repo_root = os.path.join(os.path.dirname(__file__), "../../lidarclip_repo/SST")

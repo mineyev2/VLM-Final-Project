@@ -1,8 +1,8 @@
-
 import argparse
 import logging
 import os
 import gc
+import sys
 from datetime import datetime
 
 import torch
@@ -17,8 +17,12 @@ import numpy as np
 from scipy import interpolate
 import wandb
 
+# ✅ FIX 1: Add project root to Python path
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
+
 # Import the new model class
-from src.models.lidarclip_qwen_model import LidarCLIPQwenModel  # Assuming you save it as a separate file
+from src.models.lidarclip_qwen_model import LidarCLIPQwenModel
 
 # Dataset
 from scripts.nuscenes_dataset import NuScenesDataset
@@ -42,6 +46,10 @@ def parse_args():
     parser.add_argument("--llm_path", type=str, default="Qwen/Qwen2-7B-Instruct", help="Qwen model id/path.")
     parser.add_argument("--image_encoder_path", type=str, default="openai/clip-vit-large-patch14", help="CLIP vision encoder id/path.")
     parser.add_argument("--lidar_encoder_path", type=str, default="Lidar-CLIP/vit_l_14.ckpt", help="Path to pretrained LidarCLIP weights/checkpoint.")
+    
+    # ✅ FIX 2: Add config path argument
+    parser.add_argument("--sst_config_path", type=str, default="./src/models/configs/sst_encoder_only_config.py", 
+                        help="Path to SST configuration file.")
 
     # Freezing policy
     parser.add_argument("--unfreeze-encoders", action="store_true",
@@ -77,18 +85,36 @@ def collate_fn(batch, tokenizer_pad_id):
 
 
 def create_model_and_tokenizer(args, device):
-    # Load the integrated LidarCLIPQwen model
+    """Create model and tokenizer with proper config path handling."""
     logging.info("Creating LidarCLIPQwen multimodal model...")
-    model = LidarCLIPQwenModel(
-        device=device,
-        qwen_model_name=args.llm_path,
-        clip_model_name=args.image_encoder_path,
-        lidarclip_config_path="src/models/sst_encoder_only_config.py",
-        lidarclip_checkpoint_path=args.lidar_encoder_path,
-        freeze_encoders=not args.unfreeze_encoders,
-        freeze_llm=not args.unfreeze_llm
-    )
-    model = model.to(device)
+    
+    # ✅ FIX 3: Verify and resolve config path
+    config_path = args.sst_config_path
+    if not os.path.isabs(config_path):
+        # If relative path, make it absolute from project root
+        config_path = os.path.join(project_root, config_path)
+    
+    if not os.path.isfile(config_path):
+        logging.warning(f"Config file not found: {config_path}")
+        logging.warning("Model initialization may fail if config is required")
+    else:
+        logging.info(f"Using SST config: {config_path}")
+    
+    try:
+        model = LidarCLIPQwenModel(
+            device=device,
+            qwen_model_name=args.llm_path,
+            clip_model_name=args.image_encoder_path,
+            lidarclip_config_path=config_path,  # ✅ Use verified path
+            lidarclip_checkpoint_path=args.lidar_encoder_path,
+            freeze_encoders=not args.unfreeze_encoders,
+            freeze_llm=not args.unfreeze_llm
+        )
+        model = model.to(device)
+        logging.info("✅ Model created successfully")
+    except Exception as e:
+        logging.error(f"❌ Failed to create model: {e}")
+        raise
 
     # Get tokenizer from the model
     tokenizer = model.tokenizer
@@ -96,6 +122,7 @@ def create_model_and_tokenizer(args, device):
 
 
 def count_trainable_params(model):
+    """Count and log trainable parameters."""
     trainable_params = sum(p.numel() for p in model.get_trainable_parameters())
     total_params = sum(p.numel() for p in model.parameters())
     logging.info(
@@ -122,10 +149,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
 
     # Optionally save encoder states if they were trained
     if hasattr(model, "vision_tower"):
-        if not model.vision_tower.training:
+        if model.vision_tower.training:
             checkpoint['vision_encoder_state_dict'] = model.vision_tower.state_dict()
     if hasattr(model, "lidar_encoder"):
-        if not model.lidar_encoder.training:
+        if model.lidar_encoder.training:
             checkpoint['lidar_encoder_state_dict'] = model.lidar_encoder.state_dict()
 
     torch.save(checkpoint, save_path)
@@ -171,13 +198,19 @@ def main():
     # Some older dataset versions expected prompt parts; pass empty strings if unavailable.
     prompt_part1 = getattr(model, "prompt_part1", "")
     prompt_part2 = getattr(model, "prompt_part2", "")
-    dataset = NuScenesDataset(
-        version=args.version,
-        dataroot=args.dataroot,
-        tokenizer=tokenizer,
-        prompt_part1=prompt_part1,
-        prompt_part2=prompt_part2
-    )
+    
+    try:
+        dataset = NuScenesDataset(
+            version=args.version,
+            dataroot=args.dataroot,
+            tokenizer=tokenizer,
+            prompt_part1=prompt_part1,
+            prompt_part2=prompt_part2
+        )
+        logging.info(f"✅ Dataset loaded: {len(dataset)} samples")
+    except Exception as e:
+        logging.error(f"❌ Failed to load dataset: {e}")
+        raise
 
     # Dataloader
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -223,26 +256,52 @@ def main():
 
             optimizer.zero_grad()
 
-            # Convert lidar_data from tensor to list of tensors if needed
+            # ✅ FIX 4: Better handle lidar data conversion
             point_clouds = None
             if lidar_data is not None:
-                if isinstance(lidar_data, torch.Tensor):
+                # Filter out None values
+                point_clouds = [pc for pc in lidar_data if pc is not None]
+                if len(point_clouds) == 0:
+                    point_clouds = None
+                elif isinstance(point_clouds[0], torch.Tensor):
+                    # Already in correct format
+                    pass
+                elif isinstance(lidar_data, torch.Tensor):
+                    # Convert batched tensor to list
                     point_clouds = [lidar_data[i] for i in range(lidar_data.shape[0])]
-                else:
-                    point_clouds = lidar_data
 
-            # Get logits from the model
-            logits = model(
-                images=images,
-                point_clouds=point_clouds,
-                input_ids=input_ids,
-                use_vision=True,
-                use_lidar=(point_clouds is not None)
-            )
+            # Get output from the model
+            # ✅ FIX 5: Handle model output (could be logits or tuple)
+            try:
+                output = model(
+                    images=images,
+                    point_clouds=point_clouds,
+                    input_ids=input_ids,
+                    use_vision=True,
+                    use_lidar=(point_clouds is not None)
+                )
+                
+                # Handle different return types
+                if isinstance(output, tuple):
+                    logits = output[0]
+                else:
+                    logits = output
+                    
+            except Exception as e:
+                logging.error(f"Forward pass failed: {e}")
+                # Log batch info for debugging
+                logging.error(f"Batch size: {len(images)}")
+                logging.error(f"Input IDs shape: {input_ids.shape}")
+                logging.error(f"Point clouds: {point_clouds is not None}")
+                raise
 
             # Compute loss
             loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
             loss.backward()
+            
+            # Gradient clipping (optional but recommended)
+            torch.nn.utils.clip_grad_norm_(model.get_trainable_parameters(), max_norm=1.0)
+            
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -260,10 +319,14 @@ def main():
 
         # Save checkpoint
         if (epoch + 1) % args.save_every == 0 or (epoch + 1) == args.epochs:
-            checkpoint_path = os.path.join(args.output_dir, "checkpoint_latest.pth")
+            checkpoint_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch+1}.pth")
             save_checkpoint(model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, checkpoint_path)
             print(colored(f"Checkpoint saved: {checkpoint_path}", "yellow"))
             wandb.save(checkpoint_path, policy="now")
+            
+            # Also save as "latest"
+            latest_path = os.path.join(args.output_dir, "checkpoint_latest.pth")
+            save_checkpoint(model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, latest_path)
 
     print(colored("Training finished successfully!", "green"))
 
@@ -292,7 +355,6 @@ def main():
     ax.set_title('Training Loss Over Time', fontsize=18, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right', fontsize=12)
-    import io
     plt.tight_layout()
 
     plot_png_path = os.path.join(args.output_dir, "loss_history.png")
