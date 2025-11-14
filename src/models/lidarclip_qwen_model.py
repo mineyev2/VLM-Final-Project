@@ -5,7 +5,7 @@ import sys
 import os
 
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
-from mmdet3d.sst import LidarEncoderSST
+from .sst import LidarEncoderSST
 
 
 class LidarCLIPQwenModel(nn.Module):
