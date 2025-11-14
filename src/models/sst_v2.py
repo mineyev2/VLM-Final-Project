@@ -6,14 +6,14 @@ import copy
 from mmcv.cnn import build_conv_layer, build_norm_layer
 from .sst_basic_block_v2 import BasicShiftBlockV2
 
-from mmdet3d.ops import flat2window_v2, window2flat_v2
+from .sst_ops import flat2window_v2, window2flat_v2
 
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
-@BACKBONES.register_module(module_name='SSTv2')
+@BACKBONES.register_module()
 class SSTv2(nn.Module):
     '''
     Single-stride Sparse Transformer. 

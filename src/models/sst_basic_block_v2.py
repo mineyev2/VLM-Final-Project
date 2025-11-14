@@ -1,0 +1,228 @@
+# sst_basic_block_v2.py - Modernized for mmcv 2.x / mmengine
+# using flat2win_v2 without voxel_drop_level
+
+import torch
+import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
+from mmengine.runner import autocast
+from mmcv.cnn import build_norm_layer
+
+# ✅ FIXED: Import from local sst_ops instead of mmdet3d.ops
+from .sst_ops import flat2window_v2, window2flat_v2
+
+import os
+import pickle as pkl
+
+
+def _get_activation_fn(activation):
+    """Return an activation function given a string"""
+    if activation == "relu":
+        return nn.ReLU()
+    if activation == "gelu":
+        return nn.GELU()
+    if activation == "glu":
+        return nn.GLU()
+    raise RuntimeError(f"activation should be relu/gelu/glu, not {activation}.")
+
+
+class WindowAttention(nn.Module):
+    """Window-based multi-head attention module."""
+
+    def __init__(self, d_model, nhead, dropout, batch_first=False, layer_id=None):
+        super().__init__()
+        self.nhead = nhead
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.exe_counter = 0
+        self.layer_id = layer_id
+
+    def forward(self, feat_2d, pos_dict, ind_dict, key_padding_dict):
+        '''
+        Args:
+            feat_2d: [N, d_model] flattened features
+            pos_dict: position embeddings for each window
+            ind_dict: indices for window grouping
+            key_padding_dict: padding masks for each window
+
+        Returns:
+            results: [N, d_model] output features
+        '''
+        out_feat_dict = {}
+
+        # Convert flat features to windowed features
+        feat_3d_dict = flat2window_v2(feat_2d, ind_dict)
+
+        for name in feat_3d_dict:
+            # [n, num_token, embed_dim]
+            pos = pos_dict[name]
+            feat_3d = feat_3d_dict[name]
+            feat_3d = feat_3d.permute(1, 0, 2)  # [num_token, n, embed_dim]
+
+            v = feat_3d
+
+            if pos is not None:
+                pos = pos.permute(1, 0, 2)
+                assert pos.shape == feat_3d.shape, f'pos_shape: {pos.shape}, feat_shape:{feat_3d.shape}'
+                q = k = feat_3d + pos
+            else:
+                q = k = feat_3d
+
+            key_padding_mask = key_padding_dict[name]
+            out_feat_3d, attn_map = self.self_attn(q, k, value=v, key_padding_mask=key_padding_mask)
+            out_feat_dict[name] = out_feat_3d.permute(1, 0, 2)
+
+        # Convert windowed features back to flat
+        results = window2flat_v2(out_feat_dict, ind_dict)
+        
+        return results
+
+
+class EncoderLayer(nn.Module):
+    """Transformer encoder layer with window attention."""
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", batch_first=False, layer_id=None, mlp_dropout=0, layer_cfg=dict()):
+        super().__init__()
+        
+        self.batch_first = batch_first
+        self.win_attn = WindowAttention(d_model, nhead, dropout, layer_id=layer_id)
+        
+        # Feedforward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(mlp_dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        # Normalization layers
+        use_bn = layer_cfg.get('use_bn', False)
+        if use_bn:
+            # Use LayerNorm for better compatibility
+            self.norm1 = nn.LayerNorm(d_model)
+            self.norm2 = nn.LayerNorm(d_model)
+        else:
+            self.norm1 = nn.LayerNorm(d_model)
+            self.norm2 = nn.LayerNorm(d_model)
+        
+        self.dropout1 = nn.Dropout(mlp_dropout)
+        self.dropout2 = nn.Dropout(mlp_dropout)
+
+        self.activation = _get_activation_fn(activation)
+        self.post_norm = layer_cfg.get('post_norm', True)
+        self.fp16_enabled = False
+
+    def forward(self, src, pos_dict, ind_dict, key_padding_mask_dict):
+        '''
+        Args:
+            src: [N, d_model] input features
+            pos_dict: position embeddings
+            ind_dict: window indices
+            key_padding_mask_dict: padding masks
+
+        Returns:
+            src: [N, d_model] output features
+        '''
+        if self.post_norm:
+            # Post-normalization: attention -> add -> norm
+            src2 = self.win_attn(src, pos_dict, ind_dict, key_padding_mask_dict)
+            src = src + self.dropout1(src2)
+            src = self.norm1(src)
+            
+            # FFN
+            src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+            src = src + self.dropout2(src2)
+            src = self.norm2(src)
+        else:
+            # Pre-normalization: norm -> attention -> add
+            src2 = self.norm1(src)
+            src2 = self.win_attn(src2, pos_dict, ind_dict, key_padding_mask_dict)
+            src = src + self.dropout1(src2)
+            
+            # FFN
+            src2 = self.norm2(src)
+            src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+            src = src + self.dropout2(src2)
+        
+        return src
+
+
+class BasicShiftBlockV2(nn.Module):
+    '''
+    Consist of two encoder layers: one with regular windows, one with shifted windows.
+    This implements the shift-window mechanism from SST.
+    '''
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", batch_first=False, block_id=-100, layer_cfg=dict()):
+        super().__init__()
+
+        self.block_id = block_id
+
+        # Two encoder layers: regular and shifted
+        encoder_1 = EncoderLayer(d_model, nhead, dim_feedforward, dropout,
+                                activation, batch_first, layer_id=0, layer_cfg=layer_cfg)
+        encoder_2 = EncoderLayer(d_model, nhead, dim_feedforward, dropout,
+                                activation, batch_first, layer_id=1, layer_cfg=layer_cfg)
+        
+        self.encoder_list = nn.ModuleList([encoder_1, encoder_2])
+
+    def forward(self, src, pos_embed_list, ind_dict_list, key_padding_mask_list, using_checkpoint=False):
+        '''
+        Args:
+            src: [N, d_model] input features
+            pos_embed_list: list of position embeddings for each shift
+            ind_dict_list: list of index dicts for each shift
+            key_padding_mask_list: list of padding masks for each shift
+            using_checkpoint: whether to use gradient checkpointing
+
+        Returns:
+            output: [N, d_model] output features after two encoder layers
+        '''
+        num_shifts = 2
+        assert len(pos_embed_list) == num_shifts
+        assert len(ind_dict_list) == num_shifts
+
+        output = src
+        for i in range(num_shifts):
+            pos_embed_dict = pos_embed_list[i]
+            ind_dict = ind_dict_list[i]
+            key_padding_mask_dict = key_padding_mask_list[i]
+            
+            if using_checkpoint:
+                output = checkpoint(
+                    self.encoder_list[i],
+                    output,
+                    pos_embed_dict,
+                    ind_dict,
+                    key_padding_mask_dict
+                )
+            else:
+                output = self.encoder_list[i](
+                    output,
+                    pos_embed_dict,
+                    ind_dict,
+                    key_padding_mask_dict
+                )
+
+        return output
+
+
+# Test code
+if __name__ == "__main__":
+    print("Testing BasicShiftBlockV2...")
+    
+    # Create dummy inputs
+    batch_size = 2
+    num_voxels = 1000
+    d_model = 128
+    nhead = 8
+    
+    # Create block
+    block = BasicShiftBlockV2(
+        d_model=d_model,
+        nhead=nhead,
+        dim_feedforward=256,
+        dropout=0.1,
+        activation="gelu",
+        block_id=0
+    )
+    
+    print(f"✓ Block created with {d_model} dims, {nhead} heads")
+    print(f"  Parameters: {sum(p.numel() for p in block.parameters()):,}")

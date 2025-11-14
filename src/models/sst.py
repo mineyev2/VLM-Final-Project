@@ -9,6 +9,11 @@ from torch import nn
 from mmengine import Config
 from mmdet3d.registry import MODELS
 
+# ✅ CRITICAL: Import SST components to register them
+from .sst_v2 import SSTv2
+from .sst_input_layer_v2 import SSTInputLayerV2
+from .voxel_encoder import DynamicVFE
+
 # Import attention pooling (you'll need to have this file)
 try:
     from .attention_pool import AttentionPool2d
@@ -225,7 +230,7 @@ if __name__ == "__main__":
     # Example usage
     try:
         encoder = LidarEncoderSST(
-            sst_config="./sst_encoder_only_config.py",
+            sst_config="./mmdet3d/configs/sst_encoder_only_config.py",
             clip_embedding_dim=1024,
             checkpoint=None
         )

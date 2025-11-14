@@ -23,7 +23,7 @@ class LidarCLIPQwenModel(nn.Module):
         device,
         qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
         clip_model_name="openai/clip-vit-large-patch14",
-        lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
+        lidarclip_config_path="./lidarclip/model/mmdet3d/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,
         freeze_encoders=True,
         freeze_llm=True,
