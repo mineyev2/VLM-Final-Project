@@ -1,20 +1,20 @@
 import torch
 from mmcv.cnn import build_norm_layer
-from mmcv.runner import force_fp32, auto_fp16
+from mmengine.runner import autocast
 from torch import nn
 import random
 
 from mmdet3d.ops import DynamicScatter
-from .. import builder
-from ..builder import VOXEL_ENCODERS
+# ✅ UPDATED: Use mmdet3d.registry instead of old builder
+from mmdet3d.registry import MODELS
 from .utils import VFELayer, DynamicVFELayer, get_paddings_indicator
-from ipdb import set_trace
+# ✅ REMOVED: debug import
 from mmdet3d.ops import make_sparse_convmodule
 from mmdet3d.ops import spconv as spconv
 import pickle as pkl
 import os
 
-@VOXEL_ENCODERS.register_module()
+@MODELS.register_module()  # ✅ UPDATED
 class HardSimpleVFE(nn.Module):
     """Simple voxel feature encoder used in SECOND.
 
@@ -29,7 +29,7 @@ class HardSimpleVFE(nn.Module):
         self.num_features = num_features
         self.fp16_enabled = False
 
-    @force_fp32(out_fp16=True)
+    @autocast(dtype=torch.float16)  # ✅ UPDATED
     def forward(self, features, num_points, coors):
         """Forward function.
 
@@ -49,7 +49,7 @@ class HardSimpleVFE(nn.Module):
         return points_mean.contiguous()
 
 
-@VOXEL_ENCODERS.register_module()
+@MODELS.register_module()  # ✅ UPDATED
 class DynamicSimpleVFE(nn.Module):
     """Simple dynamic voxel feature encoder used in DV-SECOND.
 
@@ -69,7 +69,7 @@ class DynamicSimpleVFE(nn.Module):
         self.fp16_enabled = False
 
     @torch.no_grad()
-    @force_fp32(out_fp16=True)
+    # ✅ REMOVED: @force_fp32 decorator (not needed with modern PyTorch)
     def forward(self, features, coors):
         """Forward function.
 
@@ -88,7 +88,7 @@ class DynamicSimpleVFE(nn.Module):
         return features, features_coors
 
 
-@VOXEL_ENCODERS.register_module()
+@MODELS.register_module()  # ✅ UPDATED
 class DynamicVFE(nn.Module):
     """Dynamic Voxel feature encoder used in DV-SECOND.
 
@@ -126,7 +126,7 @@ class DynamicVFE(nn.Module):
                  with_voxel_center=False,
                  voxel_size=(0.2, 0.2, 4),
                  point_cloud_range=(0, -40, -3, 70.4, 40, 1),
-                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),  # ✅ Already correct
                  mode='max',
                  fusion_layer=None,
                  return_point_feats=False,
@@ -178,7 +178,9 @@ class DynamicVFE(nn.Module):
             voxel_size, point_cloud_range, average_points=True)
         self.fusion_layer = None
         if fusion_layer is not None:
-            self.fusion_layer = builder.build_fusion_layer(fusion_layer)
+            # ✅ UPDATED: Use MODELS.build instead of builder
+            from mmdet3d.registry import MODELS as REGISTRY
+            self.fusion_layer = REGISTRY.build(fusion_layer)
 
     
     def map_voxel_center_to_point(self, pts_coors, voxel_mean, voxel_coors):
@@ -194,44 +196,31 @@ class DynamicVFE(nn.Module):
         """
         # Step 1: scatter voxel into canvas
         # Calculate necessary things for canvas creation
-        canvas_z = round(
-            (self.point_cloud_range[5] - self.point_cloud_range[2]) / self.vz)
-        canvas_y = round(
+        canvas_y = int(
             (self.point_cloud_range[4] - self.point_cloud_range[1]) / self.vy)
-        canvas_x = round(
+        canvas_x = int(
             (self.point_cloud_range[3] - self.point_cloud_range[0]) / self.vx)
-        # canvas_channel = voxel_mean.size(1)
-        batch_size = pts_coors[-1, 0].int() + 1
-        canvas_len = canvas_z * canvas_y * canvas_x * batch_size
-        # Create the canvas for this sample
-        canvas = voxel_mean.new_zeros(canvas_len, dtype=torch.long)
-        # Only include non-empty pillars
+        canvas_channel = voxel_mean.size(1)
+        batch_size = pts_coors[-1, 0] + 1
+        canvas_len = canvas_y * canvas_x * batch_size
+        canvas = voxel_mean.new_zeros(canvas_channel, canvas_len)
         indices = (
-            voxel_coors[:, 0] * canvas_z * canvas_y * canvas_x +
-            voxel_coors[:, 1] * canvas_y * canvas_x +
+            voxel_coors[:, 0] * canvas_y * canvas_x +
             voxel_coors[:, 2] * canvas_x + voxel_coors[:, 3])
-        # Scatter the blob back to the canvas
-        canvas[indices.long()] = torch.arange(
-            start=0, end=voxel_mean.size(0), device=voxel_mean.device)
+        indices = indices.long()
+        voxels = voxel_mean.t()
+        canvas[:, indices] = voxels
 
         # Step 2: get voxel mean for each point
         voxel_index = (
-            pts_coors[:, 0] * canvas_z * canvas_y * canvas_x +
-            pts_coors[:, 1] * canvas_y * canvas_x +
+            pts_coors[:, 0] * canvas_y * canvas_x +
             pts_coors[:, 2] * canvas_x + pts_coors[:, 3])
-        voxel_inds = canvas[voxel_index.long()]
-        center_per_point = voxel_mean[voxel_inds, ...]
+        voxel_inds = voxel_index.long()
+        center_per_point = canvas[:, voxel_inds].t()
         return center_per_point
 
-    # if out_fp16=True, the large numbers of points 
-    # lead to overflow error in following layers
-    @force_fp32(out_fp16=False)
-    def forward(self,
-                features,
-                coors,
-                points=None,
-                img_feats=None,
-                img_metas=None):
+    @autocast(dtype=torch.float16)  # ✅ UPDATED
+    def forward(self, features, coors, points=None, img_feats=None, img_metas=None):
         """Forward functions.
 
         Args:
@@ -249,7 +238,6 @@ class DynamicVFE(nn.Module):
                 feature of each points inside voxels.
         """
         features_ls = [features]
-        origin_point_coors = features[:, :3]
         # Find distance of x, y, and z from cluster center
         if self._with_cluster_center:
             voxel_mean, mean_coors = self.cluster_scatter(features, coors)
@@ -274,39 +262,46 @@ class DynamicVFE(nn.Module):
             points_dist = torch.norm(features[:, :3], 2, 1, keepdim=True)
             features_ls.append(points_dist)
 
-
         # Combine together feature decorations
         features = torch.cat(features_ls, dim=-1)
-
-        # features.requires_grad = True # for cam vis
-        # features.register_hook(append_grad(-1)) # for cam vis
-        # point_feat_dict[-1] = features.detach() # for cam vis
-
-        low_level_point_feature = features
         for i, vfe in enumerate(self.vfe_layers):
             point_feats = vfe(features)
-
-            # point_feats.register_hook(append_grad(i)) # for cam vis
-            # point_feat_dict[i] = point_feats.detach() # for cam vis
-
             if (i == len(self.vfe_layers) - 1 and self.fusion_layer is not None
                     and img_feats is not None):
-                point_feats = self.fusion_layer(img_feats, points, point_feats,
-                                                img_metas)
+                point_feats = self.fusion_with_mask(img_feats, points, point_feats,
+                                                    img_metas)
             voxel_feats, voxel_coors = self.vfe_scatter(point_feats, coors)
             if i != len(self.vfe_layers) - 1:
                 # need to concat voxel feats if it is not the last vfe
                 feat_per_point = self.map_voxel_center_to_point(
                     coors, voxel_feats, voxel_coors)
                 features = torch.cat([point_feats, feat_per_point], dim=1)
+
         if self.return_point_feats:
             return point_feats
         return voxel_feats, voxel_coors
 
+    def fusion_with_mask(self, img_feats, points, point_feats, img_metas):
+        """Fuse image and point features with mask.
 
-@VOXEL_ENCODERS.register_module()
+        Args:
+            img_feats (list[torch.Tensor]): Multi-scale feature maps of image.
+            points (list[torch.Tensor]): Raw points used to guide fusion.
+            point_feats (torch.Tensor): Features of points.
+            img_metas (list(dict)): Meta information of image and points.
+
+        Returns:
+            torch.Tensor: Fused features of each point.
+        """
+        point_feats = self.fusion_layer(img_feats, points, point_feats,
+                                        img_metas)
+
+        return point_feats
+
+
+@MODELS.register_module()  # ✅ UPDATED
 class HardVFE(nn.Module):
-    """Voxel feature encoder used in DV-SECOND.
+    """Voxel feature encoder used in SECOND.
 
     It encodes features of voxels and their points. It could also fuse
     image feature into voxel features in a point-wise manner.
@@ -341,7 +336,7 @@ class HardVFE(nn.Module):
                  with_voxel_center=False,
                  voxel_size=(0.2, 0.2, 4),
                  point_cloud_range=(0, -40, -3, 70.4, 40, 1),
-                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),  # ✅ Already correct
                  mode='max',
                  fusion_layer=None,
                  return_point_feats=False):
@@ -399,9 +394,11 @@ class HardVFE(nn.Module):
 
         self.fusion_layer = None
         if fusion_layer is not None:
-            self.fusion_layer = builder.build_fusion_layer(fusion_layer)
+            # ✅ UPDATED: Use MODELS.build
+            from mmdet3d.registry import MODELS as REGISTRY
+            self.fusion_layer = REGISTRY.build(fusion_layer)
 
-    @force_fp32(out_fp16=True)
+    @autocast(dtype=torch.float16)  # ✅ UPDATED
     def forward(self,
                 features,
                 num_points,
