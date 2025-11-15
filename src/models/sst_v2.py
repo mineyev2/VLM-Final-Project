@@ -12,7 +12,6 @@ from .sst_ops import flat2window_v2, window2flat_v2
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-
 @BACKBONES.register_module()
 class SSTv2(nn.Module):
     '''

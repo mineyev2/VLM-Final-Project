@@ -6,7 +6,7 @@ Cleaned version for LidarCLIP - only essential components
 import torch
 from torch import nn
 from mmcv.cnn import build_norm_layer
-from mmdet3d.ops import DynamicScatter
+from .dynamic_scatter import DynamicScatter
 from mmdet3d.registry import MODELS
 
 # Import utility layers from same directory
