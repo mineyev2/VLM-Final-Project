@@ -36,14 +36,21 @@ drop_info = (drop_info_training, drop_info_test)
 num_encoder_layers = 4
 
 # Direct component configs (no full detector wrapper)
-model = dict(
+model =dict(
+    voxel_layer=dict(
+        max_num_points=-1,
+        point_cloud_range=point_cloud_range,  # ✅ [0, -20.0, -2, 40.0, 20.0, 4]
+        voxel_size=voxel_size,  # ✅ [0.5, 0.5, 6]
+        max_voxels=(-1, -1)
+    ),
+    
     voxel_encoder=dict(
         type='DynamicVFE',
         in_channels=4,
         feat_channels=[64, 128],
         with_distance=False,
         voxel_size=voxel_size,
-        with_cluster_center=True,
+        with_cluster_center=False,
         with_voxel_center=True,
         point_cloud_range=point_cloud_range,
         norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01)
