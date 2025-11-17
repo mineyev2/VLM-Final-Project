@@ -113,7 +113,7 @@ class NuScenesDataset(Dataset):
             nsweeps=self.nsweeps, # TODO: This isn't working right now
             min_distance=1.0  # Filter out points closer than 1 meter
         )
-        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points) # 4 x N
+        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points.T).float() # [N,4]
 
         # Get front camera image
         camera_token = sample['data']['CAM_FRONT']
