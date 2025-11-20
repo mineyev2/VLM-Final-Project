@@ -210,16 +210,39 @@ class EvalNuScenes:
 
 def load_checkpoint_into_model(model, ckpt_path, device):
     """
-    For now, only loading the glue layers (MLP projector).
+    For now, only 2 options:
+    1) Model is just glue layer
+    2) Model is full checkpoint with projector + vision tower + language model
+
+    So only checking for these two cases in here
     """
     data = torch.load(ckpt_path, map_location=device)
 
-    try:
-        model.mlp_projector.load_state_dict(data)
-        print(colored(f"Loaded projector state_dict from {ckpt_path}", "green"))
-    except Exception as e:
-        print(colored(f"Warning: failed to load projector state_dict: {e}", "red"))
-    return
+    # try:
+    #     model.mlp_projector.load_state_dict(data)
+    #     print(colored(f"Loaded projector state_dict from {ckpt_path}", "green"))
+    # except Exception as e:
+    #     print(colored(f"Warning: failed to load projector state_dict: {e}", "red"))
+    # return
+
+
+
+    if 'language_model_state_dict' in data:
+        try:
+            model.language_model.load_state_dict(data['language_model_state_dict'], strict=False)
+            model.vision_tower.load_state_dict(data['vision_tower_state_dict'])
+            model.mlp_projector.load_state_dict(data['model_state_dict'])
+            print(colored("Loaded full checkpoint (projector + vision tower + language model).", "green"))
+        except Exception as e:
+            print(colored(f"Warning loading model: {e}", "red"))
+
+    else:
+        try:
+            model.mlp_projector.load_state_dict(data)
+            print(colored(f"Loaded projector state_dict from {ckpt_path}", "green"))
+        except Exception as e:
+            print(colored(f"Warning: failed to load projector state_dict: {e}", "red"))
+
 
     # If it's a raw state dict for projector (train saved that as checkpoint_latest.pth)
     # if all(isinstance(k, str) for k in data.keys()) and any('weight' in k or 'bias' in k for k in data.keys()):
@@ -268,12 +291,22 @@ def load_checkpoint_into_model(model, ckpt_path, device):
 
 def evaluate(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = QwenCLIPModel(device, qwen_model_name=args.llm)
+    
+    # Clear GPU cache before loading
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+    
+    model = QwenCLIPModel(device, qwen_model_name=args.llm, checkpoint_path=args.checkpoint)
 
     # Load checkpoint
     if args.checkpoint is not None:
         print(colored(f"Loading model weights from {args.checkpoint}...", "white"))
-        load_checkpoint_into_model(model, args.checkpoint, device)
+        
+        # Clear cache again before loading checkpoint weights
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+            
+        # load_checkpoint_into_model(model, args.checkpoint, device)
 
     model.eval()
 
@@ -289,7 +322,7 @@ def evaluate(args):
     
     # Select random samples for visualization
     vis_indices = set(np.random.choice(n_samples, size=min(args.num_vis, n_samples), replace=False)) if args.num_vis > 0 else set()
-    vis_dir = os.path.join(args.output_dir, args.llm + '_visualizations')
+    vis_dir = os.path.join(args.output_dir, 'visualizations')
 
     for idx in tqdm(range(n_samples), desc='Evaluating'):
         item = ds.get_item(idx)
@@ -366,6 +399,11 @@ def evaluate(args):
 
         gen_text = gen_texts[0]
         pred_coords = parse_coords_from_text(gen_text, max_points=10)
+        
+        # Print generated text for inspection
+        print(colored(f"\n[Sample {idx}] Generated text:", "cyan"))
+        print(gen_texts)
+        print(colored(f"Parsed waypoints: {pred_coords.shape[0]}/10", "yellow"))
         
         num_valid_waypoints = pred_coords.shape[0]
         format_compliant = (num_valid_waypoints == 10)
@@ -509,14 +547,19 @@ def parse_args():
     parser.add_argument('--version', type=str, default='v1.0-test')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint (final_model.pth or projector state dict)')
     parser.add_argument('--num_samples', type=int, default=100, help='Number of samples to evaluate (default 100 or all if -1)')
-    parser.add_argument('--batch_size', type=int, default=1) # TODO: Match with training batch size?
-    parser.add_argument('--output_dir', type=str, default='./eval_outputs')
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
     parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')
     parser.add_argument('--num_vis', type=int, default=10, help='Number of random samples to visualize (0 to disable)')
+    parser.add_argument('--run_name', type=str, required=True, help='Name for this evaluation run (used to keep track of ablations)')
 
     # Print args used
     args = parser.parse_args()
+    
+    # Append run_name to output_dir after parsing
+    args.output_dir = os.path.join(args.output_dir, args.run_name)
+    
     print(colored("--- Evaluation Configuration ---", "cyan"))
     for k, v in vars(args).items():
         print(colored(f"{k}: {v}", "cyan"))

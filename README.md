@@ -155,3 +155,8 @@ my-ml-project/
 ├── .gitignore             # Ignore unnecessary files (e.g. /data, /runs, .ipynb_checkpoints)
 └── configs.yaml           # Default config (hyperparameters, paths)
 ```
+
+### Debugging Notes
+
+Things to try fixing incorrect text at inference:
+Add EOS token at the end of target_string. That way, LLM learns to stop.
