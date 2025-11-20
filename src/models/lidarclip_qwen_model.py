@@ -3,6 +3,7 @@ import torch.nn as nn
 from transformers import CLIPVisionModel, CLIPImageProcessor, AutoModelForCausalLM, AutoTokenizer
 import sys
 import os
+from termcolor import colored
 
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
 from .sst import LidarEncoderSST
@@ -254,6 +255,62 @@ class LidarCLIPQwenModel(nn.Module):
         if return_features:
             return outputs.logits, features_dict
         return outputs.logits
+
+    # =========================================================================
+    def generate_trajectory(self, images, point_clouds, ego_positions):
+        """
+        FOR INFERENCE: The non-differentiable generation method.
+        """
+
+        image_features = self.vision_tower(pixel_values=images).last_hidden_state
+        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
+
+        # --- Prompt formatting (same as before) ---
+        prompts = []
+        for pos_tensor in ego_positions:
+            pos_list = [f"[{pos[0]:.2f}, {pos[1]:.2f}]" for pos in pos_tensor]
+            pos_str = ", ".join(pos_list)
+            final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
+            prompts.append(final_prompt)
+
+        if self.qwen_model_name == "Qwen/Qwen3-4B": # TODO: Change model name
+            print(colored("Using Qwen3-4B prompt template...", "cyan"))
+            full_prompts = [self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True, enable_thinking=False
+            ) for p in prompts]
+        else:
+            full_prompts = [self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True,
+            ) for p in prompts]
+        
+        inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
+        text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
+        combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
+
+        
+
+        # Create attention mask for image embeddings (all real)
+        image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
+        # Combine with text attention mask
+        combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+
+        # --- Generation with strict constraints to prevent thinking mode ---
+        outputs = self.language_model.generate(
+            inputs_embeds=combined_embeddings,
+            attention_mask=combined_attention_mask,
+            max_new_tokens=200,  # Reduced - trajectory should be ~100 tokens max
+            min_new_tokens=50,   # Ensure it generates something substantial
+            pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            do_sample=False,     # Greedy decoding for consistency
+            num_beams=5,         # No beam search
+            output_scores=True,
+            return_dict_in_generate=True
+        )
+
+        generated_ids = outputs.sequences
+        generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        return outputs, generated_text
 
     # =========================================================================
 

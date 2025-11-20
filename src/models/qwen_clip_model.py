@@ -74,7 +74,7 @@ class QwenCLIPModel(nn.Module):
         # 1. Process the image input
         image_features = self.vision_tower(pixel_values=images).last_hidden_state
         projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
-
+        
         # 2. Get the embeddings for the text input
         text_embeddings = self.language_model.get_input_embeddings()(input_ids)
 

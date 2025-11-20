@@ -9,7 +9,7 @@ import cv2
 from tqdm import tqdm
 from termcolor import colored
 
-from src.models.qwen_clip_model import QwenCLIPModel
+from src.models.lidarclip_qwen_model import LidarCLIPQwenModel
 from src.utils.utils import ProjectWorldToImage, OffsetTrajectory3D
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
@@ -128,7 +128,7 @@ def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to
         print(f"Visualization failed for sample {idx}: {e}")
 
 
-class EvalNuScenes:
+class EvalNuScenesLiDAR:
     def __init__(self, version, dataroot, prompt_part1, prompt_part2, nsweeps=5):
         self.nusc = NuScenes(version=version, dataroot=dataroot)
         self.nsweeps = nsweeps
@@ -174,6 +174,17 @@ class EvalNuScenes:
         camera_data = self.nusc.get('sample_data', camera_token)
         image_path = os.path.join(self.nusc.dataroot, camera_data['filename'])
         image = Image.open(image_path).convert('RGB')
+
+        # LiDAR point cloud with nsweeps
+        nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
+            self.nusc,
+            sample,
+            chan='LIDAR_TOP',
+            ref_chan='LIDAR_TOP',
+            nsweeps=self.nsweeps,
+            min_distance=1.0  # Filter out points closer than 1 meter
+        )
+        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points) # 4 x N
         
         # Get camera calibration for visualization
         cam_calib = self.nusc.get('calibrated_sensor', camera_data['calibrated_sensor_token'])
@@ -201,6 +212,7 @@ class EvalNuScenes:
 
         return {
             'image': image,
+            "lidar": torch_pointcloud,
             'ego_positions': ego_positions,
             'waypoints': np.array(waypoints, dtype=float),
             'cam_to_ego': cam_to_ego,
@@ -296,8 +308,7 @@ def evaluate(args):
     if device == 'cuda':
         torch.cuda.empty_cache()
     
-    model = QwenCLIPModel(device, qwen_model_name=args.llm, checkpoint_path=args.checkpoint)
-
+    model = LidarCLIPQwenModel(device, qwen_model_name=args.llm, checkpoint_path=args.checkpoint)
     # Load checkpoint
     if args.checkpoint is not None:
         print(colored(f"Loading model weights from {args.checkpoint}...", "white"))
@@ -314,7 +325,8 @@ def evaluate(args):
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
 
     # dataset for evaluation
-    ds = EvalNuScenes(args.version, args.dataroot, model.prompt_part1, model.prompt_part2)
+    # TODO: Add LiDAR here
+    ds = EvalNuScenesLiDAR(args.version, args.dataroot, model.prompt_part1, model.prompt_part2)
 
     results = []
 
@@ -553,7 +565,7 @@ def parse_args():
     parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')
     parser.add_argument('--num_vis', type=int, default=10, help='Number of random samples to visualize (0 to disable)')
     parser.add_argument('--run_name', type=str, required=True, help='Name for this evaluation run (used to keep track of ablations)')
-
+    
     # Print args used
     args = parser.parse_args()
     
