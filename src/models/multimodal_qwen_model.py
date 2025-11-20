@@ -81,7 +81,7 @@ class MultimodalQwenModel(nn.Module):
     def __init__(
         self,
         device,
-        qwen_model_name="Qwen/Qwen2.5-3B",
+        qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
         clip_model_name="openai/clip-vit-large-patch14",
         sst_config_path="src/models/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,
@@ -426,7 +426,7 @@ if __name__ == "__main__":
     
     model = MultimodalQwenModel(
         device=device,
-        qwen_model_name="Qwen/Qwen2.5-3B",
+        qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
         clip_model_name="openai/clip-vit-large-patch14",
         sst_config_path="src/models/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,  # Set to checkpoint path to load

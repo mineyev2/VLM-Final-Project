@@ -90,7 +90,7 @@ def parse_args():
     parser.add_argument(
         "--qwen_model_name",
         type=str,
-        default="Qwen/Qwen2.5-3B",
+        default="Qwen/Qwen2.5-3B-Instruct",
         help="Qwen model name from HuggingFace"
     )
     parser.add_argument(
