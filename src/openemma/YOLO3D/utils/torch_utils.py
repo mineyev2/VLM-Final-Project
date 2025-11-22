@@ -18,7 +18,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from openemma.YOLO3D.utils.general import LOGGER
+from src.openemma.YOLO3D.utils.general import LOGGER
 
 try:
     import thop  # for FLOPs computation

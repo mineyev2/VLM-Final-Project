@@ -3,16 +3,16 @@
 Run inference on images, videos, directories, streams, etc.
 """
 
-from openemma.YOLO3D.script.Model import ResNet, ResNet18, VGG11
-from openemma.YOLO3D.script import Model, ClassAverages
-from openemma.YOLO3D.library.Plotting import *
-from openemma.YOLO3D.library.Math import *
-from openemma.YOLO3D.script.Dataset import generate_bins, DetectedObject
+from src.openemma.YOLO3D.script.Model import ResNet, ResNet18, VGG11
+from src.openemma.YOLO3D.script import Model, ClassAverages
+from src.openemma.YOLO3D.library.Plotting import *
+from src.openemma.YOLO3D.library.Math import *
+from src.openemma.YOLO3D.script.Dataset import generate_bins, DetectedObject
 import numpy as np
 from torchvision.models import resnet18
 import torch.nn as nn
-from openemma.YOLO3D.utils.torch_utils import select_device, time_sync
-from openemma.YOLO3D.utils.general import (
+from src.openemma.YOLO3D.utils.torch_utils import select_device, time_sync
+from src.openemma.YOLO3D.utils.general import (
     LOGGER,
     check_img_size,
     check_requirements,
@@ -20,7 +20,7 @@ from openemma.YOLO3D.utils.general import (
     print_args,
     scale_coords,
 )
-from openemma.YOLO3D.utils.datasets import LoadImages
+from src.openemma.YOLO3D.utils.datasets import LoadImages
 import argparse
 import os
 import sys

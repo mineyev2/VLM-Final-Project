@@ -13,7 +13,7 @@ from torchvision import transforms
 from torch.utils import data
 
 # library
-from openemma.YOLO3D.library.Calib import get_P
+from src.openemma.YOLO3D.library.Calib import get_P
 
 from .ClassAverages import ClassAverages
 
