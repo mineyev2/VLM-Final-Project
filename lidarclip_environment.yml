@@ -1,6 +1,0 @@
-name: lidarclip
-channels:
-  - defaults
-dependencies:
-  - python==3.9.23
-prefix: /home/hice1/hliu852/scratch/miniconda/envs/lidarclip
