@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import csv
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -325,6 +326,8 @@ def evaluate(args):
     vis_dir = os.path.join(args.output_dir, 'visualizations')
 
     for idx in tqdm(range(n_samples), desc='Evaluating'):
+        start_time = time.time()
+        
         item = ds.get_item(idx)
         image = item['image']
         ego_positions = item['ego_positions']
@@ -432,6 +435,8 @@ def evaluate(args):
         # Per-waypoint errors for analysis
         waypoint_errors = l2_per_waypoint.tolist()
 
+        processing_time = time.time() - start_time
+        
         results.append({
             'idx': idx,
             'cross_entropy_loss': float(cross_entropy_loss),
@@ -443,6 +448,7 @@ def evaluate(args):
             'fde': float(fde),
             'miss_rate_10m': float(miss_rate_10m),
             'waypoint_errors': waypoint_errors,
+            'processing_time_sec': float(processing_time),
             'gen_text': gen_text
         })
         
@@ -466,6 +472,7 @@ def evaluate(args):
     fdes = [r['fde'] for r in results if not np.isnan(r['fde'])]
     miss_rates = [r['miss_rate_10m'] for r in results]
     format_compliance = [r['format_compliant'] for r in results]
+    processing_times = [r['processing_time_sec'] for r in results]
     
     # Per-waypoint aggregate errors
     all_waypoint_errors = [r['waypoint_errors'] for r in results]
@@ -485,6 +492,10 @@ def evaluate(args):
         'fde_std': float(np.std(fdes)) if len(fdes) > 0 else float('nan'),
         'miss_rate_10m': float(np.mean(miss_rates)) if len(miss_rates) > 0 else float('nan'),
         'format_compliance_rate': float(np.mean(format_compliance)) if len(format_compliance) > 0 else float('nan'),
+        # Timing metrics
+        'avg_processing_time_sec': float(np.mean(processing_times)) if len(processing_times) > 0 else float('nan'),
+        'total_processing_time_sec': float(np.sum(processing_times)) if len(processing_times) > 0 else float('nan'),
+        'fps': float(1.0 / np.mean(processing_times)) if len(processing_times) > 0 and np.mean(processing_times) > 0 else float('nan'),
         # Per-waypoint breakdown
         'per_waypoint_errors_mean': waypoint_means
     }
@@ -496,7 +507,8 @@ def evaluate(args):
     # Flatten waypoint_errors for CSV (convert list to individual columns)
     with open(csv_path, 'w', newline='') as f:
         fieldnames = ['idx', 'cross_entropy_loss', 'perplexity', 'token_accuracy', 
-                     'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m'] + \
+                     'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
+                     'processing_time_sec'] + \
                      [f'wp{i}_error' for i in range(10)] + ['gen_text']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -511,6 +523,7 @@ def evaluate(args):
                 'ade': r['ade'],
                 'fde': r['fde'],
                 'miss_rate_10m': r['miss_rate_10m'],
+                'processing_time_sec': r['processing_time_sec'],
                 'gen_text': r['gen_text']
             }
             # Add per-waypoint errors
@@ -546,8 +559,8 @@ def parse_args():
     parser.add_argument('--dataroot', type=str, default='/storage/ice-shared/cs8803vlm/rmineyev3')
     parser.add_argument('--version', type=str, default='v1.0-test')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint (final_model.pth or projector state dict)')
-    parser.add_argument('--num_samples', type=int, default=100, help='Number of samples to evaluate (default 100 or all if -1)')
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--num_samples', type=int, default=-1, help='Number of samples to evaluate (default 100 or all if -1)')
+    parser.add_argument('--batch_size', type=int, default=28)
     parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
     parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')
