@@ -141,13 +141,19 @@ class QwenCLIPModel(nn.Module):
 
     def _load_checkpoint_weights(self, checkpoint_data):
         """Load weights from checkpoint dict into model components."""
+
+        # Print all keys
+        print(colored("Checkpoint keys:", "yellow"))
+        for key in checkpoint_data.keys():
+            print(f"  - {key}")
+
         if 'language_model_state_dict' in checkpoint_data:
             # Full checkpoint
             self.language_model.load_state_dict(checkpoint_data['language_model_state_dict'], strict=False)
             self.vision_tower.load_state_dict(checkpoint_data['vision_tower_state_dict'])
-            self.mlp_projector.load_state_dict(checkpoint_data['mlp_projector_state_dict'])
+            self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'])
             print(colored("✓ Loaded LLM + vision encoder + MLP projector", "green"))
         else:
             # MLP-only checkpoint
-            self.mlp_projector.load_state_dict(checkpoint_data)
+            self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'])
             print(colored("✓ Loaded MLP projector", "green"))
