@@ -151,7 +151,7 @@ class QwenCLIPModel(nn.Module):
             # Full checkpoint
             self.language_model.load_state_dict(checkpoint_data['language_model_state_dict'], strict=False)
             self.vision_tower.load_state_dict(checkpoint_data['vision_tower_state_dict'])
-            self.mlp_projector.load_state_dict(checkpoint_data['mlp_projector_state_dict'])
+            self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'])
             print(colored("✓ Loaded LLM + vision encoder + MLP projector", "green"))
         else:
             # MLP-only checkpoint

@@ -260,7 +260,11 @@ def add_trajectory_to_matplotlib(ax, gt_waypoints_2d, pred_waypoints_2d, cam_to_
 
 
 def visualize_trajectory_bev(bev_image_path, gt_waypoints, pred_waypoints, ego_pose, output_path):
-    """Add trajectory overlay to bird's eye view image."""
+    """Add trajectory overlay to bird's eye view image.
+    
+    BEV is rendered in ego vehicle frame (use_flat_vehicle_coordinates=True by default),
+    so we need to rotate waypoints from world frame to ego frame.
+    """
     try:
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
@@ -276,39 +280,58 @@ def visualize_trajectory_bev(bev_image_path, gt_waypoints, pred_waypoints, ego_p
         # Get image dimensions
         height, width = bev_img.shape[:2]
         
-        # NuScenes BEV rendering uses a default range, typically 50m
-        # The ego vehicle is at the center of the image
-        bev_range = 50  # meters from center
+        # NuScenes render_sample_data uses default axes_limit=40 meters
+        bev_range = 40  # meters from center (default in render_sample_data)
         pixels_per_meter = width / (2 * bev_range)
         
         # Center pixel coordinates
         center_x = width / 2
         center_y = height / 2
         
-        # Convert world coordinates to pixel coordinates
-        # Ego is at center, x points forward, y points left
-        def world_to_pixel(waypoints, ego_translation):
-            # Relative to ego position
+        # Convert world coordinates to ego frame, then to pixel coordinates
+        # BEV is rendered in ego vehicle frame (use_flat_vehicle_coordinates=True by default)
+        def world_to_pixel(waypoints, ego_translation, ego_rotation):
+            # Translate to ego-relative coordinates
             rel_x = waypoints[:, 0] - ego_translation[0]
             rel_y = waypoints[:, 1] - ego_translation[1]
             
-            # In BEV: x forward -> up (negative y pixel), y left -> left (negative x pixel)
-            pixel_x = center_x - rel_y * pixels_per_meter
-            pixel_y = center_y - rel_x * pixels_per_meter
+            # Stack into 2D points for rotation
+            rel_points = np.vstack([rel_x, rel_y])
+            
+            # Rotate from world frame to ego frame
+            # BEV uses flat ego frame (only yaw rotation)
+            ego_quat = Quaternion(ego_rotation)
+            yaw = ego_quat.yaw_pitch_roll[0]
+            
+            # Create rotation matrix for yaw only (flat ego frame)
+            cos_yaw = np.cos(-yaw)  # Negative yaw to rotate world to ego
+            sin_yaw = np.sin(-yaw)
+            rotation_matrix = np.array([
+                [cos_yaw, -sin_yaw],
+                [sin_yaw, cos_yaw]
+            ])
+            
+            # Apply rotation
+            ego_points = rotation_matrix @ rel_points
+            
+            # Convert to pixel coordinates
+            pixel_x = center_x + ego_points[0, :] * pixels_per_meter
+            pixel_y = center_y - ego_points[1, :] * pixels_per_meter  # Flipped y-axis
             
             return pixel_x, pixel_y
         
         ego_translation = ego_pose['translation']
+        ego_rotation = ego_pose['rotation']
         
         # Plot ground truth trajectory (green)
         if len(gt_waypoints) > 0:
-            gt_px, gt_py = world_to_pixel(gt_waypoints, ego_translation)
+            gt_px, gt_py = world_to_pixel(gt_waypoints, ego_translation, ego_rotation)
             ax.plot(gt_px, gt_py, 'o-', color='lime', linewidth=3, markersize=8, label='Ground Truth')
         
         # Plot predicted trajectory (orange)
         valid_pred = pred_waypoints[~np.isnan(pred_waypoints).any(axis=1)]
         if len(valid_pred) > 0:
-            pred_px, pred_py = world_to_pixel(valid_pred, ego_translation)
+            pred_px, pred_py = world_to_pixel(valid_pred, ego_translation, ego_rotation)
             ax.plot(pred_px, pred_py, 'o-', color='orange', linewidth=3, markersize=8, label='Predicted')
         
         # Add ego vehicle marker at center
@@ -316,6 +339,10 @@ def visualize_trajectory_bev(bev_image_path, gt_waypoints, pred_waypoints, ego_p
         
         ax.legend(loc='upper right', fontsize=12)
         ax.axis('off')
+        
+        # Set axis limits to match image dimensions
+        ax.set_xlim(0, width)
+        ax.set_ylim(height, 0)
         
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -490,29 +517,87 @@ def evaluate_single_sample(args):
         if args.show_lidar:
             try:
                 print(colored("\nRendering LiDAR overlay...", "yellow"))
-                ds.nusc.render_pointcloud_in_image(
-                    sample_token=item['sample_token'],
-                    dot_size=args.lidar_point_size,
-                    pointsensor_channel='LIDAR_TOP',
-                    camera_channel='CAM_FRONT',
-                    out_path=None,
-                    render_intensity=False,
-                    show_lidarseg=False,
-                    show_panoptic=False
-                )
                 
-                # Add trajectory overlay to the matplotlib figure before saving
-                import matplotlib.pyplot as plt
-                ax = plt.gca()
-                add_trajectory_to_matplotlib(
-                    ax, gt_waypoints, pred_waypoints_valid,
-                    cam_to_ego, ego_to_world,
-                    img_width=image.size[0], img_height=image.size[1]
+                # Get LiDAR points in image coordinates using NuScenes helper
+                from nuscenes.utils.data_classes import LidarPointCloud
+                from nuscenes.utils.geometry_utils import view_points
+                
+                # Get sample and sensor data
+                sample = item['sample']
+                cam_token = sample['data']['CAM_FRONT']
+                lidar_token = sample['data']['LIDAR_TOP']
+                
+                cam_data = ds.nusc.get('sample_data', cam_token)
+                lidar_data = ds.nusc.get('sample_data', lidar_token)
+                
+                # Load LiDAR point cloud
+                lidar_path = os.path.join(ds.nusc.dataroot, lidar_data['filename'])
+                pc = LidarPointCloud.from_file(lidar_path)
+                
+                # Get calibration
+                cam_calib = ds.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
+                lidar_calib = ds.nusc.get('calibrated_sensor', lidar_data['calibrated_sensor_token'])
+                
+                # Transform from lidar to camera
+                pc.rotate(Quaternion(lidar_calib['rotation']).rotation_matrix)
+                pc.translate(np.array(lidar_calib['translation']))
+                
+                # Get poses
+                cam_pose = ds.nusc.get('ego_pose', cam_data['ego_pose_token'])
+                lidar_pose = ds.nusc.get('ego_pose', lidar_data['ego_pose_token'])
+                
+                # Transform to global
+                pc.rotate(Quaternion(lidar_pose['rotation']).rotation_matrix)
+                pc.translate(np.array(lidar_pose['translation']))
+                
+                # Transform from global to camera ego
+                pc.translate(-np.array(cam_pose['translation']))
+                pc.rotate(Quaternion(cam_pose['rotation']).rotation_matrix.T)
+                
+                # Transform to camera
+                pc.translate(-np.array(cam_calib['translation']))
+                pc.rotate(Quaternion(cam_calib['rotation']).rotation_matrix.T)
+                
+                # Project to image
+                depths = pc.points[2, :]
+                intrinsic = np.array(cam_calib['camera_intrinsic'])
+                points = view_points(pc.points[:3, :], intrinsic, normalize=True)
+                
+                # Filter points in front of camera and within image bounds
+                mask = np.ones(depths.shape[0], dtype=bool)
+                mask = np.logical_and(mask, depths > 0)
+                mask = np.logical_and(mask, points[0, :] > 0)
+                mask = np.logical_and(mask, points[0, :] < image.size[0])
+                mask = np.logical_and(mask, points[1, :] > 0)
+                mask = np.logical_and(mask, points[1, :] < image.size[1])
+                
+                points = points[:, mask]
+                depths = depths[mask]
+                
+                # Create image with LiDAR points
+                img_lidar = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                
+                # Color by depth (closer = red, farther = blue)
+                max_depth = 50.0
+                for i in range(points.shape[1]):
+                    depth = min(depths[i], max_depth)
+                    color_ratio = depth / max_depth
+                    color = (int(255 * color_ratio), int(255 * (1 - color_ratio) * 0.5), int(255 * (1 - color_ratio)))
+                    cv2.circle(img_lidar, (int(points[0, i]), int(points[1, i])), 
+                             args.lidar_point_size, color, -1)
+                
+                # Convert to PIL for trajectory overlay
+                img_lidar_pil = Image.fromarray(cv2.cvtColor(img_lidar, cv2.COLOR_BGR2RGB))
+                
+                # Add trajectory overlay using same function as sample.jpg
+                img_with_traj = visualize_trajectory(
+                    img_lidar_pil, gt_waypoints, pred_waypoints_valid,
+                    cam_to_ego, ego_to_world, args.sample_idx,
+                    args.output_dir, return_img=True
                 )
                 
                 output_path = os.path.join(args.output_dir, f'sample_{args.sample_idx:04d}_lidar.jpg')
-                plt.savefig(output_path, dpi=150, bbox_inches='tight')
-                plt.close()
+                cv2.imwrite(output_path, img_with_traj)
                 print(colored(f"✓ LiDAR with trajectory overlay saved to: {output_path}", "green"))
             except Exception as e:
                 print(colored(f"✗ LiDAR rendering failed: {e}", "red"))
@@ -526,7 +611,6 @@ def evaluate_single_sample(args):
                 
                 ds.nusc.render_sample_data(
                     lidar_token,
-                    with_anns=False,
                     underlay_map=True,
                     out_path=None,
                     nsweeps=5,
@@ -609,4 +693,14 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    evaluate_single_sample(args)
+    
+    while True:
+        evaluate_single_sample(args)
+        new_idx = input(colored("Enter new sample index to evaluate (or 'q' to quit): ", "yellow"))
+        if new_idx.lower() == 'q':
+            print(colored("Exiting evaluation.", "cyan"))
+            break
+        try:
+            args.sample_idx = int(new_idx)
+        except ValueError:
+            print(colored("Invalid input. Please enter a valid integer index or 'q' to quit.", "red"))
