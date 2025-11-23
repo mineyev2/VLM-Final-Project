@@ -9,8 +9,8 @@ import random
 import cv2
 import numpy as np
 
-from openemma.YOLO3D.utils.general import LOGGER, check_version, colorstr, resample_segments, segment2box
-from openemma.YOLO3D.utils.metrics import bbox_ioa
+from src.openemma.YOLO3D.utils.general import LOGGER, check_version, colorstr, resample_segments, segment2box
+from src.openemma.YOLO3D.utils.metrics import bbox_ioa
 
 
 class Albumentations:

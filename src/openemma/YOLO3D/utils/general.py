@@ -29,8 +29,8 @@ import torch
 import torchvision
 import yaml
 
-from openemma.YOLO3D.utils.downloads import gsutil_getsize
-from openemma.YOLO3D.utils.metrics import box_iou, fitness
+from src.openemma.YOLO3D.utils.downloads import gsutil_getsize
+from src.openemma.YOLO3D.utils.metrics import box_iou, fitness
 
 # Settings
 FILE = Path(__file__).resolve()
