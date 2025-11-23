@@ -406,7 +406,7 @@ class MultimodalQwenModel(nn.Module):
             # Generate
             outputs = self.language_model.generate(
                 inputs_embeds=combined_embeddings,
-                max_new_tokens=512,
+                max_new_tokens=2048,  # Increased from 512 (set to None for model's max context length)
                 pad_token_id=self.tokenizer.eos_token_id,
                 output_scores=True,
                 return_dict_in_generate=True
