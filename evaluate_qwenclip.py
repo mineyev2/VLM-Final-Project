@@ -325,144 +325,167 @@ def evaluate(args):
     vis_indices = set(np.random.choice(n_samples, size=min(args.num_vis, n_samples), replace=False)) if args.num_vis > 0 else set()
     vis_dir = os.path.join(args.output_dir, 'visualizations')
 
-    for idx in tqdm(range(n_samples), desc='Evaluating'):
-        start_time = time.time()
+    # Process in batches
+    batch_size = args.batch_size
+    num_batches = (n_samples + batch_size - 1) // batch_size
+    
+    for batch_idx in tqdm(range(num_batches), desc='Evaluating'):
+        batch_start_time = time.time()
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, n_samples)
+        batch_indices = list(range(start_idx, end_idx))
         
-        item = ds.get_item(idx)
-        image = item['image']
-        ego_positions = item['ego_positions']
-        gt_waypoints = item['waypoints']
-        cam_to_ego = item['cam_to_ego']
-        ego_to_world = item['ego_to_world']
-
-        # prepare image tensor
-        pixel_values = model.image_processor(images=[image], return_tensors='pt').pixel_values.to(device)
-
-        # convert ego_positions to Python float lists for compatibility with generate_trajectory
-        ego_positions_py = [[float(x), float(y)] for (x, y) in ego_positions]
-
-        # === Compute Cross-Entropy Loss (like training) ===
-        cross_entropy_loss = np.nan
-        token_accuracy = np.nan
-        perplexity = np.nan
+        # Collect batch data
+        batch_items = [ds.get_item(idx) for idx in batch_indices]
+        batch_images = [item['image'] for item in batch_items]
+        batch_ego_positions = [item['ego_positions'] for item in batch_items]
+        batch_gt_waypoints = [item['waypoints'] for item in batch_items]
+        batch_cam_to_ego = [item['cam_to_ego'] for item in batch_items]
+        batch_ego_to_world = [item['ego_to_world'] for item in batch_items]
+        
+        # Process images
+        pixel_values = model.image_processor(images=batch_images, return_tensors='pt').pixel_values.to(device)
+        
+        # Convert ego_positions to Python float lists
+        batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
+        
+        # === Compute Cross-Entropy Loss (batched) ===
+        batch_ce_losses = []
+        batch_token_accs = []
+        batch_perplexities = []
         
         try:
             with torch.no_grad():
-                # Prepare ground truth text (same format as training)
-                pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_positions])
-                prompt = f"{model.prompt_part1}[{pos_str}]\n{model.prompt_part2}"
+                # Prepare batch of texts
+                batch_prompts = []
+                batch_full_texts = []
+                for ego_pos, gt_wp in zip(batch_ego_positions, batch_gt_waypoints):
+                    pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_pos])
+                    prompt = f"{model.prompt_part1}[{pos_str}]\n{model.prompt_part2}"
+                    wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in gt_wp])
+                    target_string = "Future Trajectory: " + wp_str
+                    full_text = prompt + target_string
+                    batch_prompts.append(prompt)
+                    batch_full_texts.append(full_text)
                 
-                wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in gt_waypoints])
-                target_string = "Future Trajectory: " + wp_str
+                # Tokenize batch with padding
+                batch_inputs = model.tokenizer(batch_full_texts, return_tensors="pt", padding=True).to(device)
+                batch_input_ids = batch_inputs.input_ids
                 
-                full_text = prompt + target_string
-                input_ids = model.tokenizer(full_text, return_tensors="pt").input_ids.to(device)
+                # Create labels for each sample
+                batch_labels = batch_input_ids.clone()
+                for i, prompt in enumerate(batch_prompts):
+                    prompt_tokens = model.tokenizer(prompt, return_tensors="pt").input_ids
+                    prompt_length = prompt_tokens.shape[1]
+                    batch_labels[i, :prompt_length] = -100
                 
-                # Create labels (mask prompt tokens)
-                labels = input_ids.clone()
-                prompt_tokens = model.tokenizer(prompt, return_tensors="pt").input_ids
-                prompt_length = prompt_tokens.shape[1]
-                labels[:, :prompt_length] = -100
+                # Forward pass
+                batch_logits = model(pixel_values, batch_input_ids)
                 
-                # Forward pass to get logits
-                logits = model(pixel_values, input_ids)
+                # Compute loss per sample
+                num_image_patches = batch_logits.shape[1] - batch_labels.shape[1]
+                logits_for_loss = batch_logits[:, num_image_patches:-1, :]
+                labels_for_loss = batch_labels[:, 1:]
                 
-                # Align logits and labels (same as training)
-                num_image_patches = logits.shape[1] - labels.shape[1]
-                logits_for_loss = logits[:, num_image_patches:-1, :]
-                labels_for_loss = labels[:, 1:]
-                
-                # Compute per-token loss
-                losses = loss_fn(
-                    logits_for_loss.reshape(-1, logits_for_loss.size(-1)),
-                    labels_for_loss.reshape(-1)
-                )
-                
-                # Filter out ignored tokens (-100)
-                valid_losses = losses[labels_for_loss.reshape(-1) != -100]
-                if len(valid_losses) > 0:
-                    cross_entropy_loss = valid_losses.mean().item()
-                    perplexity = np.exp(cross_entropy_loss)
+                for i in range(len(batch_indices)):
+                    sample_logits = logits_for_loss[i:i+1]
+                    sample_labels = labels_for_loss[i:i+1]
                     
-                    # Token-level accuracy
-                    preds = logits_for_loss.argmax(dim=-1)
-                    valid_mask = labels_for_loss != -100
-                    if valid_mask.sum() > 0:
-                        correct = (preds == labels_for_loss) & valid_mask
-                        token_accuracy = correct.sum().item() / valid_mask.sum().item()
+                    losses = loss_fn(
+                        sample_logits.reshape(-1, sample_logits.size(-1)),
+                        sample_labels.reshape(-1)
+                    )
+                    
+                    valid_losses = losses[sample_labels.reshape(-1) != -100]
+                    if len(valid_losses) > 0:
+                        ce_loss = valid_losses.mean().item()
+                        batch_ce_losses.append(ce_loss)
+                        batch_perplexities.append(np.exp(ce_loss))
+                        
+                        # Token accuracy
+                        preds = sample_logits.argmax(dim=-1)
+                        valid_mask = sample_labels != -100
+                        if valid_mask.sum() > 0:
+                            correct = (preds == sample_labels) & valid_mask
+                            token_acc = correct.sum().item() / valid_mask.sum().item()
+                            batch_token_accs.append(token_acc)
+                        else:
+                            batch_token_accs.append(np.nan)
+                    else:
+                        batch_ce_losses.append(np.nan)
+                        batch_perplexities.append(np.nan)
+                        batch_token_accs.append(np.nan)
         except Exception as e:
-            print(f"Loss computation failed for idx {idx}: {e}")
-
-        # === Generate trajectory for coordinate metrics ===
+            print(f"Loss computation failed for batch {batch_idx}: {e}")
+            batch_ce_losses = [np.nan] * len(batch_indices)
+            batch_perplexities = [np.nan] * len(batch_indices)
+            batch_token_accs = [np.nan] * len(batch_indices)
+        
+        # === Generate trajectories (batched) ===
         try:
-            outputs, gen_texts = model.generate_trajectory(pixel_values, [ego_positions_py])
+            outputs, gen_texts = model.generate_trajectory(pixel_values, batch_ego_positions_py)
         except Exception as e:
-            print(f"Generation failed for idx {idx}: {e}")
+            print(f"Generation failed for batch {batch_idx}: {e}")
             continue
-
-        gen_text = gen_texts[0]
-        pred_coords = parse_coords_from_text(gen_text, max_points=10)
         
-        # Print generated text for inspection
-        print(colored(f"\n[Sample {idx}] Generated text:", "cyan"))
-        print(gen_texts)
-        print(colored(f"Parsed waypoints: {pred_coords.shape[0]}/10", "yellow"))
+        # Process each sample in batch
+        batch_time = time.time() - batch_start_time
+        per_sample_time = batch_time / len(batch_indices)
         
-        num_valid_waypoints = pred_coords.shape[0]
-        format_compliant = (num_valid_waypoints == 10)
-
-        if pred_coords.shape[0] < 10:
-            # pad with NaNs so shapes align
-            pad = np.full((10 - pred_coords.shape[0], 2), np.nan)
-            pred_coords = np.vstack([pred_coords, pad])
-        elif pred_coords.shape[0] > 10:
-            # Truncate if more than 10
-            pred_coords = pred_coords[:10]
-
-        # === Coordinate-based metrics ===
-        diffs = pred_coords - gt_waypoints
-        l2_per_waypoint = np.linalg.norm(diffs, axis=1)
-        
-        # ADE (Average Displacement Error)
-        ade = np.nanmean(l2_per_waypoint)
-        
-        # FDE (Final Displacement Error)
-        fde = l2_per_waypoint[-1]
-        
-        # Miss rate at 10m threshold
-        miss_rate_10m = 1.0 if fde > 10.0 else 0.0
-        
-        # Per-waypoint errors for analysis
-        waypoint_errors = l2_per_waypoint.tolist()
-
-        processing_time = time.time() - start_time
-        
-        results.append({
-            'idx': idx,
-            'cross_entropy_loss': float(cross_entropy_loss),
-            'perplexity': float(perplexity),
-            'token_accuracy': float(token_accuracy),
-            'num_valid_waypoints': int(num_valid_waypoints),
-            'format_compliant': int(format_compliant),
-            'ade': float(ade),
-            'fde': float(fde),
-            'miss_rate_10m': float(miss_rate_10m),
-            'waypoint_errors': waypoint_errors,
-            'processing_time_sec': float(processing_time),
-            'gen_text': gen_text
-        })
-        
-        # Visualize trajectories for selected samples
-        if idx in vis_indices:
-            visualize_trajectories(
-                image, 
-                gt_waypoints, 
-                pred_coords[:num_valid_waypoints] if num_valid_waypoints > 0 else np.array([]).reshape(0, 2),
-                cam_to_ego,
-                ego_to_world,
-                idx,
-                vis_dir
-            )
+        for i, idx in enumerate(batch_indices):
+            gen_text = gen_texts[i]
+            pred_coords = parse_coords_from_text(gen_text, max_points=10)
+            
+            # Print generated text for first few samples
+            if idx < 5 or idx in vis_indices:
+                print(colored(f"\n[Sample {idx}] Generated text:", "cyan"))
+                print(gen_text)
+                print(colored(f"Parsed waypoints: {pred_coords.shape[0]}/10", "yellow"))
+            
+            num_valid_waypoints = pred_coords.shape[0]
+            format_compliant = (num_valid_waypoints == 10)
+            
+            if pred_coords.shape[0] < 10:
+                pad = np.full((10 - pred_coords.shape[0], 2), np.nan)
+                pred_coords = np.vstack([pred_coords, pad])
+            elif pred_coords.shape[0] > 10:
+                pred_coords = pred_coords[:10]
+            
+            # Coordinate metrics
+            gt_waypoints = batch_gt_waypoints[i]
+            diffs = pred_coords - gt_waypoints
+            l2_per_waypoint = np.linalg.norm(diffs, axis=1)
+            ade = np.nanmean(l2_per_waypoint)
+            fde = l2_per_waypoint[-1]
+            miss_rate_10m = 1.0 if fde > 10.0 else 0.0
+            waypoint_errors = l2_per_waypoint.tolist()
+            
+            results.append({
+                'idx': idx,
+                'cross_entropy_loss': float(batch_ce_losses[i]),
+                'perplexity': float(batch_perplexities[i]),
+                'token_accuracy': float(batch_token_accs[i]),
+                'num_valid_waypoints': int(num_valid_waypoints),
+                'format_compliant': int(format_compliant),
+                'ade': float(ade),
+                'fde': float(fde),
+                'miss_rate_10m': float(miss_rate_10m),
+                'waypoint_errors': waypoint_errors,
+                'processing_time_sec': float(per_sample_time),
+                'gen_text': gen_text
+            })
+            
+            # Visualize selected samples
+            if idx in vis_indices:
+                visualize_trajectories(
+                    batch_items[i]['image'],
+                    gt_waypoints,
+                    pred_coords[:num_valid_waypoints] if num_valid_waypoints > 0 else np.array([]).reshape(0, 2),
+                    batch_cam_to_ego[i],
+                    batch_ego_to_world[i],
+                    idx,
+                    vis_dir
+                )
 
     # aggregate metrics
     ce_losses = [r['cross_entropy_loss'] for r in results if not np.isnan(r['cross_entropy_loss'])]
@@ -560,7 +583,7 @@ def parse_args():
     parser.add_argument('--version', type=str, default='v1.0-test')
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint (final_model.pth or projector state dict)')
     parser.add_argument('--num_samples', type=int, default=-1, help='Number of samples to evaluate (default 100 or all if -1)')
-    parser.add_argument('--batch_size', type=int, default=28)
+    parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
     parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')

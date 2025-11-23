@@ -156,7 +156,14 @@ my-ml-project/
 └── configs.yaml           # Default config (hyperparameters, paths)
 ```
 
-### Debugging Notes
+### Random Notes
 
-Things to try fixing incorrect text at inference:
-Add EOS token at the end of target_string. That way, LLM learns to stop.
+Names of occluded scenes:
+- rainy scenes:
+    - n008-2018-09-18-12-53-31-0400__CAM_FRONT__1537290008612404.jpg
+- dark scenes:
+- dark + light scatter:
+    - n015-2018-11-21-19-38-26+0800__CAM_FRONT__1542800911412460.jpg
+    - n015-2018-11-21-19-38-26+0800__CAM_FRONT__1542800935912460.jpg
+    - n015-2018-11-21-19-38-26+0800__CAM_FRONT__1542801289912460.jpg: truck in front
+    
