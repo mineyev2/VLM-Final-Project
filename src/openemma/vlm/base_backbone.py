@@ -4,17 +4,17 @@ import re
 import torch
 import json
 import numpy as np
-
 from PIL import Image
-from src.utils.utils import query_gpt4
 from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
-
+from qwen_vl_utils import process_vision_info
+from src.utils.utils import query_gpt4
 from src.openemma.YOLO3D.inference import yolo3d_nuScenes
 
 class BaseOpenEMMA:
     def __init__(self, args):
-        super(BaseOpenEMMA, self).__init__()
-        # Default to the HF version if the user passed the raw liuhaotian path
+        """
+        Initializes the OpenEMMA model wrapper using Hugging Face Transformers.
+        """
         if args.model_id == "liuhaotian/llava-v1.6-mistral-7b":
             self.model_path = "llava-hf/llava-v1.6-mistral-7b-hf"
         else:
@@ -32,9 +32,10 @@ class BaseOpenEMMA:
                 low_cpu_mem_usage=True,
                 device_map="auto"
             )
+        
         elif "gpt" in self.model_path:
             self.api_key = args.api_key
-        # Keep existing logic for other models if needed
+            
         elif "Llama-3.2" in self.model_path:
              from transformers import MllamaForConditionalGeneration, AutoProcessor
              self.model = MllamaForConditionalGeneration.from_pretrained(
@@ -44,82 +45,87 @@ class BaseOpenEMMA:
             )
              self.processor = AutoProcessor.from_pretrained(self.model_path)
 
-    def vlm_inference(self, text=None, image_path=None, sys_message=None, args=None):
-        """
-        Unified inference function handling specific formatting for LLaVA-Next
-        """
-        if "llava" in self.model_path.lower():
-            image = Image.open(image_path).convert('RGB')
-            
-            # LLaVA-v1.6-Mistral expects: [INST] <image>\nUSER_PROMPT [/INST]
-            # The processor handles the <image> token insertion if we structure it right, 
-            # but explicit formatting is often safer for this specific model family.
-            prompt_text = f"[INST] <image>\n{text} [/INST]"
-            
-            inputs = self.processor(
-                text=prompt_text, 
-                images=image, 
-                return_tensors="pt"
-            ).to(self.model.device)
-
-            # Generate
-            output = self.model.generate(
-                **inputs, 
-                max_new_tokens=512,
-                do_sample=False, # Deterministic for evaluation
-                temperature=0.0  # Greedier decoding
+        elif "Qwen" in self.model_path:
+            print(f"Loading Qwen Instruct model: {self.model_path}...")
+            from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                self.model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
             )
+            self.processor = AutoProcessor.from_pretrained(self.model_path)
 
-            # Decode
-            output_text = self.processor.decode(output[0], skip_special_tokens=True)
+    def vlm_inference(self, text=None, image_path=None, sys_message=None, args=None):
+        if "Qwen" in self.model_path:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image_path},
+                        {"type": "text", "text": text},
+                    ],
+                }
+            ]
+            image_inputs, video_inputs = process_vision_info(messages)
+            text_input = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.processor(
+                text=[text_input],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            ).to(self.model.device)
             
-            # Post-processing: remove the input prompt from the output
-            # The decoder usually includes the input. We split by [/INST] to get the answer.
+            generated_ids = self.model.generate(**inputs, max_new_tokens=512)
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self.processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]
+            return output_text
+        
+        elif "llava" in self.model_path.lower():
+            raw_image = Image.open(image_path).convert('RGB')
+            prompt_text = f"[INST] <image>\n{text} [/INST]"
+            inputs = self.processor(text=prompt_text, images=raw_image, return_tensors="pt").to(self.model.device)
+            output = self.model.generate(**inputs, max_new_tokens=512, do_sample=False, temperature=0.0)
+            output_text = self.processor.decode(output[0], skip_special_tokens=True)
             if "[/INST]" in output_text:
                 output_text = output_text.split("[/INST]")[-1].strip()
-            
             return output_text
 
         elif "gpt" in self.model_path:
-            output_text = query_gpt4(
-                text, api_key=self.api_key, 
-                image_path=image_path,
-                sys_message=sys_message
-            )
-            return output_text
+            return query_gpt4(text, api_key=self.api_key, image_path=image_path, sys_message=sys_message)
             
-        # Fallback for Llama-3.2 (Original Logic)
         elif "Llama-3.2" in self.model_path:
-            # ... (Keep original Llama logic here if you want to support both) ...
             pass
-        
-    # --- The rest of the CoT functions remain exactly the same ---
+        return ""
+
+    # --- Prompts ---
+
+    def Scenedescription(self, image_path, backbone):
+        prompt = "Provide a short description of the driving scenario."
+        return self.vlm_inference(text=prompt, image_path=image_path)
     
+    def description_criticalobjects(self, r2, image_path, backbone):
+        prompt = f"Identified critical object: {r2}\nProvide a short description of the current status and intended actions to the above identified critical object for the ego car."
+        return self.vlm_inference(text=prompt, image_path=image_path)
+
+    def get_objects(self, image_path):
+        prompt = "Please list 2-3 key objects the ego car should focus on, specifying only the object's name and its related location in the image of the driving scene."
+        return self.vlm_inference(text=prompt, image_path=image_path)
+
     def getCoT(self, image_path, ego_fut_diff, ego_fut_trajs, ego_his_diff, backbone):
         r1 = self.Scenedescription(image_path, backbone)
         r2 = self.get_objects(image_path)
         r3 = self.description_criticalobjects(r2, image_path, backbone)
-        r4 = self.Metadecision(ego_fut_diff, ego_fut_trajs, ego_his_diff)
-        rationale = f"""Scene description:\n{r1}\nCritial objects:\n{r2}\nBehavior description:\n{r3}\nMeta driving decision:\n{r4}"""
-        return rationale
-
-    def Scenedescription(self, image_path, backbone):
-        prompt = "Provide a short description of driving scenarios."
-        r1 = self.vlm_inference(text=prompt, image_path=image_path)
-        return r1
-    
-    def description_criticalobjects(self, r2, image_path, backbone):
-        prompt = f"Identified critical object: {r2}\nProvide a short description of the current status and intended actions to the above identified critical object for the ego car."
-        r3 = self.vlm_inference(text=prompt, image_path=image_path)
-        return r3
-
-    def Metadecision(self, ego_fut_diff, ego_fut_trajs, ego_his_diff):
         r4 = self.compute_meta_action(ego_fut_diff, ego_fut_trajs, ego_his_diff)
-        return r4
+        return f"""Scene description:\n{r1}\nCritical objects:\n{r2}\nBehavior description:\n{r3}\nMeta driving decision:\n{r4}"""
 
     def compute_meta_action(self, ego_fut_diff, ego_fut_trajs, ego_his_diff):
-        # ... (Same as your original file) ...
-        meta_action = ""
         constant_eps = 0.5
         his_velos = np.linalg.norm(ego_his_diff, axis=1)
         fut_velos = np.linalg.norm(ego_fut_diff, axis=1)
@@ -127,144 +133,187 @@ class BaseOpenEMMA:
         end_velo = fut_velos[-1]
 
         if cur_velo < constant_eps and end_velo < constant_eps:
-            return "STOPPED"
+            speed_meta = "STOPPED"
         elif end_velo < constant_eps:
             speed_meta = "DECELERATING TO STOP"
         elif np.abs(end_velo - cur_velo) < constant_eps:
             speed_meta = "CONSTANT SPEED FORWARD"
         else:
-            if cur_velo > end_velo:
-                if cur_velo > 2 * end_velo:
-                    speed_meta = "QUICKLY DECELERATING"
-                else:
-                    speed_meta = "DECELERATING"
-            else:
-                if end_velo > 2 * cur_velo:
-                    speed_meta = "QUICKLY ACCELERATING"
-                else:
-                    speed_meta = "ACCELERATING"
+            speed_meta = "DECELERATING" if cur_velo > end_velo else "ACCELERATING"
         
-        forward_th = 2.0
         lane_changing_th = 4.0
+        forward_th = 2.0
+        lateral_positions = np.array(ego_fut_trajs)[:, 1] 
+        final_lateral = lateral_positions[-1]
 
-        if (np.abs(np.array(ego_fut_trajs)[:, 0]) < forward_th).all():
-            behavior_meta = "MOVING FORWARD"
+        if (np.abs(lateral_positions) < forward_th).all():
+             behavior_meta = "MOVING FORWARD"
         else:
-            if np.array(ego_fut_trajs)[-1, 0] < 0:  # left
-                if np.abs(ego_fut_trajs[-1, 0]) > lane_changing_th:
-                    behavior_meta = "TURNING LEFT"
-                else:
-                    behavior_meta = "LANE CHANGING LEFT"
-            elif np.array(ego_fut_trajs)[-1, 0] > 0:  # right
-                if np.abs(np.array(ego_fut_trajs)[-1, 0]) > lane_changing_th:
-                    behavior_meta = "TURNING RIGHT"
-                else:
-                    behavior_meta = "LANE CHANGING RIGHT"
-            else:
-                # Fallback for safety
-                behavior_meta = "MOVING FORWARD" 
+             if final_lateral > 0:
+                 if np.abs(final_lateral) > lane_changing_th:
+                     behavior_meta = "TURNING LEFT"
+                 else:
+                     behavior_meta = "LANE CHANGING LEFT"
+             elif final_lateral < 0:
+                 if np.abs(final_lateral) > lane_changing_th:
+                     behavior_meta = "TURNING RIGHT"
+                 else:
+                     behavior_meta = "LANE CHANGING RIGHT"
+             else:
+                 behavior_meta = "MOVING FORWARD"
 
-        meta_action = speed_meta + " AND " + behavior_meta
-        return meta_action
+        return speed_meta + " AND " + behavior_meta
 
     def compute_command(self, ego_fut_trajs):
         lane_changing_th = 4.0
-
-        if (np.abs(np.array(ego_fut_trajs)[:, 0]) < lane_changing_th).all():
+        traj_arr = np.array(ego_fut_trajs)
+        if (np.abs(traj_arr[:, 1]) < lane_changing_th).all():
             return "MOVE FORWARD"  
-        elif np.array(ego_fut_trajs)[-1, 0] < 0:
+        elif traj_arr[-1, 1] > 0:
             return "TURN LEFT"
-        elif np.array(ego_fut_trajs)[-1, 0] > 0:
+        elif traj_arr[-1, 1] < 0:
             return "TURN RIGHT"
         else:
-            return "MOVE FORWARD" # Fallback
+            return "MOVE FORWARD"
+
+    def estimate_kinematics(self, history, dt=0.5):
+        """
+        Calculates FULL history of Speed (m/s) and Curvature (1/m).
+        """
+        N = len(history)
+        if N < 2:
+            return [], []
+
+        diffs = history[1:] - history[:-1] 
+        dists = np.linalg.norm(diffs, axis=1)
+        speeds = dists / dt
+        
+        curvatures = []
+        if N >= 3:
+            headings = np.arctan2(diffs[:, 1], diffs[:, 0])
+            delta_thetas = headings[1:] - headings[:-1]
+            delta_thetas = (delta_thetas + np.pi) % (2 * np.pi) - np.pi
+            dists_avg = (dists[1:] + dists[:-1]) / 2.0
+            dists_avg[dists_avg < 0.01] = 0.01
+            curvatures = delta_thetas / dists_avg
+
+        return speeds.tolist(), curvatures.tolist() if isinstance(curvatures, list) else curvatures.tolist()
 
     def generate_waypoints(self, command, image_path, data=None, backbone=None, args=None):
-        ego_fut_diff = data["gt_ego_fut_diff"]
-        ego_fut_trajs = data["gt_ego_fut_trajs"]
-        ego_his_diff = data["gt_ego_his_diff"]
-        ego_his_trajs = str(data["gt_ego_his_trajs"]).replace("\n", '')
+        # 1. Normalize History
+        raw_his = np.array(data["gt_ego_his_trajs"])
+        if len(raw_his) > 0:
+            current_pos = raw_his[-1]
+            normalized_history = raw_his - current_pos
+        else:
+            normalized_history = np.zeros((1, 2))
 
-        rationale = self.getCoT(image_path, ego_fut_diff, ego_fut_trajs, ego_his_diff, backbone)
+        # 2. Estimate Kinematics
+        hist_speeds, hist_curvs = self.estimate_kinematics(normalized_history, dt=0.5)
         
-        # Note: LLaVA 1.6 might handle system messages differently, but we append it to prompt 
-        sys_message = "You have access to a surround-view camera image of the ego vehicle, a high-level intent command, a sequence of past ego waypoints, and a driving rationale. Each waypoint is represented as [x, y], where x corresponds to the lateral (left-right) position, and y corresponds to the longitudinal (front-back) position. Your task is to predict future waypoints for the ego vehicle over the next 10 seconds, ensuring the y-coordinate reaches approximately 10. Make sure it is a smooth waypoint\n\n"
+        # Robustly get current speed
+        current_speed = hist_speeds[-1] if len(hist_speeds) > 0 else 0.0
+        avg_speed = np.mean(hist_speeds[-3:]) if len(hist_speeds) >= 3 else current_speed
         
-        prompt = f"""{sys_message}##High-level command:{command}\n\n##Historical waypoints of the ego car:{ego_his_trajs}\n\n##Driving rationale:\n{rationale}\n\nOnly generate the predicted future waypoints only in the format [x1,y1], [x2,y2],...,[xn,yn]. As the ego vehicle progresses forward, the y-coordinates of future waypoints should remain positive and exhibit a steadily increasing trend over time, reflecting forward movement. Make sure the y-coordinate of the last predicted waypoint reaches approximately 10.\n\n##Future waypoints:"""
+        # Determine Trend
+        if len(hist_speeds) >= 3 and hist_speeds[-1] > hist_speeds[0] + 0.5:
+            trend = "ACCELERATING"
+        elif len(hist_speeds) >= 3 and hist_speeds[-1] < hist_speeds[0] - 0.5:
+            trend = "DECELERATING"
+        else:
+            trend = "MAINTAINING SPEED"
+
+        ego_his_trajs_str = str(normalized_history.tolist()).replace("\n", '')
+        speed_hist_str = str([round(s, 2) for s in hist_speeds]).replace("'", "")
+        curv_hist_str = str([round(k, 4) for k in hist_curvs]).replace("'", "")
+
+        rationale = self.getCoT(image_path, data["gt_ego_fut_diff"], data["gt_ego_fut_trajs"], data["gt_ego_his_diff"], backbone)
         
-        output_text = self.vlm_inference(text=prompt, image_path=image_path)
-        return output_text
+        sys_message = "You are an expert autonomous driving agent. Your task is to predict the future trajectory of the ego vehicle."
+        
+        # --- ENHANCED PROMPT ---
+        # 1. Explicitly states the Current Speed Goal.
+        # 2. Adds a "Trend" indicator to help the model decide to accelerate/brake.
+        prompt = f"""{sys_message}
+##Context:
+- Command: {command}
+- Historical Waypoints (Local): {ego_his_trajs_str}
 
-    def get_objects(self, image_path):
-        prompt = "Please list 2-3 key objects the ego car should focus on, specifying only the object's name and its location within the image of the driving scene. Only output the name of the object and its related location in the image of the driving scence without any other information."
-        output_text = self.vlm_inference(text=prompt, image_path=image_path)
-        return output_text
+##Kinematic State:
+- Speed History (m/s): {speed_hist_str}
+- Current Speed: {current_speed:.2f} m/s (Trend: {trend})
+- Curvature History (1/m): {curv_hist_str}
 
-    def spatial_reasoning(self, image_path):
-        prompt= "Detect all objects in 3D space and generate their 3D bounding boxes in the following format: [x, y, z, l, w, h, theta, cls]. Here:\n[x, y, z] specifies the object's center location in the vehicle frame,\n[l,w,h] represent the length, width, and height of the bounding box,\ntheta is the object's heading angle, and\n cls is the class label as a text identifier.\nPlease ensure that all objects are accurately identified, with precise bounding boxes according to the specified parameters."
-        output_text = self.vlm_inference(text=prompt, image_path=image_path)
-        return output_text
+##Driving Logic:
+{rationale}
 
-    def road_graph(self, image_path):
-        prompt = "Predict the drivable lanes in the provided driving scene by generating an ordered sequence of waypoints in the format x1,y1;x2,y2;...;xn,yn. Each waypoint x,y should be a floating-point number with a precision of two decimal places. Ensure the sequence accurately reflects the drivable lane paths for a precise and smooth lane trajectory."
-        output_text = self.vlm_inference(text=prompt, image_path=image_path)
-        return output_text
+##Instruction:
+Predict the future Speed (S) and Curvature (K) for the next 5 seconds (10 frames).
+1. **Speed (S):** Initialize prediction at **{current_speed:.2f} m/s**. If the path is clear and command is straight, maintain or slightly increase speed. Do NOT drop speed to near zero unless stopped.
+2. **Curvature (K):** Positive = Left, Negative = Right. Use history to smooth the turn.
 
-    def blockage_detect(self, bbx, image_path):
-        prompt = "Here is a list of objects currently in front of the ego car. Based on this information, determine if the road ahead is temporarily blocked.\n" + bbx
+##Output:
+Return ONLY the vectors in this exact format:
+S: [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10]
+K: [k1, k2, k3, k4, k5, k6, k7, k8, k9, k10]
+"""
         output_text = self.vlm_inference(text=prompt, image_path=image_path)
-        return output_text
-    
+        speed_vec, curv_vec = self.parse_s_k_vectors(output_text)
+        
+        trajectory = self.integrate_trajectory(speed_vec, curv_vec)
+        return str(trajectory)
+
+    def parse_s_k_vectors(self, text):
+        try:
+            s_match = re.search(r'S(?:peed)?\s*[:=]\s*\[([\d\.,\s-]+)\]', text, re.IGNORECASE)
+            k_match = re.search(r'K(?:urvature)?\s*[:=]\s*\[([\d\.,\s-]+)\]', text, re.IGNORECASE)
+
+            if s_match and k_match:
+                s_vec = [float(x) for x in s_match.group(1).split(',') if x.strip()]
+                k_vec = [float(x) for x in k_match.group(1).split(',') if x.strip()]
+                target_len = 10
+                s_vec = (s_vec + [0.0]*target_len)[:target_len]
+                k_vec = (k_vec + [0.0]*target_len)[:target_len]
+                return s_vec, k_vec
+        except Exception as e:
+            pass
+        return [0.0]*10, [0.0]*10
+
+    def integrate_trajectory(self, speed_vec, curv_vec, dt=0.5):
+        traj = []
+        x, y = 0.0, 0.0
+        theta = 0.0
+        
+        for s, k in zip(speed_vec, curv_vec):
+            theta += (s * k) * dt
+            x += s * np.cos(theta) * dt
+            y += s * np.sin(theta) * dt
+            traj.append([round(x, 4), round(y, 4)])
+            
+        return traj
+
     def fix_traj(self, traj):
-        """
-        Adjusts trajectory to be relative to the start if it isn't already.
-        """
         if len(traj) > 0 and np.abs(traj[0][0]) > 0.0:
+            offset_x = traj[0][0]
             for i in range(len(traj)):
-                if traj[i][0] > 0.0:
-                    traj[i][0] -= np.abs(traj[0][0])
-                else:
-                    traj[i][0] += np.abs(traj[0][0])
+                traj[i][0] -= offset_x
         return traj
 
     def frames_to_video(self, input_folder, output_file, fps):
-        """
-        Compiles a directory of images into a video file.
-        """
         images = [img for img in os.listdir(input_folder) if img.endswith(".jpg") or img.endswith(".png")]
-        images.sort()  # Sort files by name to maintain order
-
-        if not images:
-            print(f"No images found in {input_folder}")
-            return
-
+        images.sort()
+        if not images: return
         frame = cv2.imread(os.path.join(input_folder, images[0]))
         height, width, layers = frame.shape
-
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
-
         for image in images:
-            img_path = os.path.join(input_folder, image)
-            frame = cv2.imread(img_path)
-            out.write(frame) 
-        
+            out.write(cv2.imread(os.path.join(input_folder, image))) 
         out.release()
-        print(f"Video saved as {output_file}")
 
-    def plot_bbx_yolo(self, input_folder, output_file, raw_file, roi_r=25.0, roi_w=5.0, roi_d=100.0):
-        """
-        Runs YOLO3D inference on a folder of images.
-        """
+    def plot_bbx_yolo(self, input_folder, output_file, raw_file):
         images = [img for img in os.listdir(input_folder) if img.endswith(".jpg") or img.endswith(".png")]
-        images.sort()  
-
-        with open(raw_file, 'r') as file:
-            raw_data = json.load(file)
-        
+        images.sort()
         for i in range(len(images)):
-            image = images[i]
-            img_path = os.path.join(input_folder, image)
-            # Ensure output_file is treated as a directory or handle filename appending inside yolo3d_nuScenes
-            # This call signature matches your original uploaded file
-            yolo3d_nuScenes(img_path, output_file, roi_r=-1, roi_w=-1, roi_d=-1)
+            yolo3d_nuScenes(os.path.join(input_folder, images[i]), output_file, roi_r=-1, roi_w=-1, roi_d=-1)
+    
