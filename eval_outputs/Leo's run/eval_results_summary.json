@@ -1,0 +1,31 @@
+{
+  "num_samples": 28,
+  "cross_entropy_loss_mean": 21.94466461454119,
+  "cross_entropy_loss_std": 0.8522786311843008,
+  "perplexity_mean": 4811583762.516862,
+  "token_accuracy_mean": 0.08538587848932677,
+  "ade_mean": Infinity,
+  "ade_std": NaN,
+  "fde_mean": 1668031.9527755538,
+  "fde_std": 3725132.916514633,
+  "miss_rate_10m": 0.21428571428571427,
+  "failure_rate_1s": 0.4642857142857143,
+  "error_at_1s_mean": 3450995637.557583,
+  "error_at_1s_std": 10561222218.9317,
+  "format_compliance_rate": 0.21428571428571427,
+  "avg_processing_time_sec": 3.456903142588479,
+  "total_processing_time_sec": 96.7932879924774,
+  "fps": 0.28927625645051036,
+  "per_waypoint_errors_mean": [
+    Infinity,
+    3450995637.557583,
+    39199837290.91803,
+    324595963618.38806,
+    1414446014.95811,
+    694471856.9941124,
+    37444.82086999131,
+    37556.828296595246,
+    38474.56865679472,
+    1668031.9527755538
+  ]
+}

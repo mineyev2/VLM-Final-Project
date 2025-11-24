@@ -1,2 +1,0 @@
-/storage/ice1/0/0/hliu852/VLM-Final-Project/src/models/sst.py:    from mmdet3d.registry import MODELS  # mmdet3d 1.x/2.x
-/storage/ice1/0/0/hliu852/VLM-Final-Project/src/models/sst.py:    from mmdet3d.models import build_model as _legacy_build_model  # 旧版
