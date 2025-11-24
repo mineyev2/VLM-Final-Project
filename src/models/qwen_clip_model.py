@@ -7,7 +7,7 @@ import psutil
 
 class QwenCLIPModel(nn.Module):
 
-    def __init__(self, device, qwen_model_name="Qwen/Qwen2.5-VL-7B-Instruct", clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
+    def __init__(self, device, qwen_model_name="Qwen/Qwen2.5-3B-Instruct", clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
         super().__init__()
 
         self.device = device
@@ -26,6 +26,8 @@ class QwenCLIPModel(nn.Module):
 
         print(f"Loading Qwen language model: {qwen_model_name}...")
         self.qwen_model_name = qwen_model_name
+        
+        # Use the text-only model (AutoModelForCausalLM is correct for Qwen2.5-3B-Instruct)
         self.language_model = AutoModelForCausalLM.from_pretrained(
             qwen_model_name,
             dtype=torch.bfloat16,
@@ -70,22 +72,19 @@ class QwenCLIPModel(nn.Module):
         Accepts pre-tokenized input_ids and labels from the dataset.
         """
         # 1. Process Images -> Features
-        # images: [batch, 3, 224, 224]
         vision_outputs = self.vision_tower(pixel_values=images)
-        image_features = vision_outputs.last_hidden_state # [batch, 257, 1024]
+        image_features = vision_outputs.last_hidden_state 
         
         # 2. Project Image Features to LLM Dimension
-        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16)) # [batch, 257, 4096]
+        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16)) 
 
         # 3. Get Text Embeddings
-        text_embeddings = self.language_model.get_input_embeddings()(input_ids) # [batch, seq_len, 4096]
+        text_embeddings = self.language_model.get_input_embeddings()(input_ids) 
 
         # 4. Concatenate: [Image Embeds, Text Embeds]
-        # This effectively prepends the image to the prompt
         combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
         
         # 5. Adjust Labels for Training
-        # We need to pad the labels to account for the image tokens we just prepended
         if labels is not None:
             # Create a filler for image tokens (ignore index -100)
             image_labels_len = projected_image_features.shape[1]
@@ -116,14 +115,12 @@ class QwenCLIPModel(nn.Module):
         # 2. Format Prompts
         prompts = []
         for pos_tensor in ego_positions:
-            # pos_tensor is expected to be a list or array of [x,y]
             pos_list = [f"[{pos[0]:.2f}, {pos[1]:.2f}]" for pos in pos_tensor]
             pos_str = ", ".join(pos_list)
             final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
             prompts.append(final_prompt)
 
         # 3. Apply Chat Template
-        # Qwen 2.5 template handling
         full_prompts = [self.tokenizer.apply_chat_template(
             [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
         ) for p in prompts]
@@ -136,7 +133,6 @@ class QwenCLIPModel(nn.Module):
         combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
 
         # 6. Attention Mask
-        # 1s for image tokens
         image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
         combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
 
@@ -149,7 +145,7 @@ class QwenCLIPModel(nn.Module):
             pad_token_id=self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
             do_sample=False,
-            num_beams=1, # Greedy is usually sufficient for traj prediction
+            num_beams=1, 
             output_scores=True,
             return_dict_in_generate=True
         )
@@ -174,4 +170,3 @@ class QwenCLIPModel(nn.Module):
             # MLP-only checkpoint
             self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'])
             print(colored("✓ Loaded MLP projector", "green"))
-        

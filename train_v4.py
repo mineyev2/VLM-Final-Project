@@ -12,8 +12,8 @@ from scipy import interpolate
 from datetime import datetime
 import wandb
 
+# Assuming these files are in the same directory or python path
 from src.models.qwen_clip_model import QwenCLIPModel
-# UPDATED: Import the new dataset file
 from scripts.nuscenes_dataset import NuScenesDataset
 
 def custom_collate_fn(batch):
@@ -51,10 +51,8 @@ def main():
                         help="Unfreeze the language model for fine-tuning.")
     parser.add_argument("--wandb_project", type=str, default="vlm-training", help="WandB project name.")
     parser.add_argument("--run_name", type=str, default=None, help="Custom run name (optional).")
-    parser.add_argument("--save_every", type=int, default=5, help="Save checkpoint every N epochs.")
-    # NEW: Resume argument
+    parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs.")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint file to resume training.")
-    
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,50 +62,75 @@ def main():
 
     model = QwenCLIPModel(device)
     
-    # Initialize Optimizer (needed before loading state)
-    optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
+    dataset = NuScenesDataset(
+        version=args.version,
+        dataroot=args.dataroot,
+        tokenizer=model.tokenizer,
+        prompt_part1=model.prompt_part1,
+        prompt_part2=model.prompt_part2
+    )
+
+    pad_id = model.tokenizer.pad_token_id
     
-    # --- RESUME LOGIC START ---
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True,
+        num_workers=args.num_workers, 
+        collate_fn=custom_collate_fn
+    )
+
+    optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
+
     start_epoch = 0
     loss_history = []
     wandb_run_id = None
     checkpoint = None
 
+    # Load checkpoint if resuming
     if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint):
         print(colored(f"--- Resuming training from: {args.resume_from_checkpoint} ---", "yellow"))
         checkpoint = torch.load(args.resume_from_checkpoint, weights_only=False, map_location=device)
         
-        # Load Weights
         model.mlp_projector.load_state_dict(checkpoint['mlp_projector_state_dict'])
         model.vision_tower.load_state_dict(checkpoint['vision_tower_state_dict'])
         model.language_model.load_state_dict(checkpoint['language_model_state_dict'])
         
-        # Restore Training State
         start_epoch = checkpoint['epoch']
-        loss_history = checkpoint.get('loss_history', [])
-        wandb_run_id = checkpoint.get('wandb_run_id')
-        
-        # Restore Args if available, specifically the run name to keep outputs in same folder
-        if 'run_name' in checkpoint:
-            args.run_name = checkpoint['run_name']
+        loss_history = checkpoint['loss_history']
+        wandb_run_id = checkpoint['wandb_run_id']
+        args.run_name = checkpoint['run_name'] 
+
+        args.freeze_vision_tower = checkpoint['args'].freeze_vision_tower
+        args.freeze_lang_model = checkpoint['args'].freeze_lang_model
         
         print(colored(f"--- Resumed from Epoch {start_epoch}. WandB Run ID: {wandb_run_id} ---", "yellow"))
     else:
-        # Generate new run name if not resuming
         if args.run_name is None:
             date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
             args.run_name = f"{date_str}-epochs{args.epochs}"
 
-    # Setup Output Directory (after resolving run_name)
+    if args.freeze_vision_tower:
+        model.vision_tower.requires_grad_(False)
+    else:
+        optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
+    if args.freeze_lang_model:
+        model.language_model.requires_grad_(False)
+    else:
+        optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
+
+    if checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(colored("--- Optimizer state successfully restored ---", "yellow"))
+    
     args.output_dir = os.path.join(args.output_dir, args.run_name)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Initialize WandB (New or Resume)
     if wandb_run_id:
         wandb.init(
             project=args.wandb_project,
             id=wandb_run_id, 
-            resume="must"
+            resume="must" 
         )
     else:
         wandb.init(
@@ -122,47 +145,6 @@ def main():
         print(f"{k}: {v}")
     print(colored("--------------------------", "cyan"))
 
-    # Add params to optimizer based on freeze settings
-    # Note: If resuming, we might overwrite these groups, but we load state_dict after
-    if args.freeze_vision_tower:
-        model.vision_tower.requires_grad_(False)
-    else:
-        optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
-    
-    if args.freeze_lang_model:
-        model.language_model.requires_grad_(False)
-    else:
-        optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
-
-    # Load Optimizer State (must be done after adding param groups)
-    if checkpoint and 'optimizer_state_dict' in checkpoint:
-        try:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            print(colored("--- Optimizer state successfully restored ---", "yellow"))
-        except Exception as e:
-            print(colored(f"--- Warning: Could not restore optimizer state: {e} ---", "red"))
-
-    # --- DATASET & DATALOADER ---
-    dataset = NuScenesDataset(
-        version=args.version,
-        dataroot=args.dataroot,
-        tokenizer=model.tokenizer,
-        prompt_part1=model.prompt_part1,
-        prompt_part2=model.prompt_part2
-    )
-
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        num_workers=args.num_workers, 
-        collate_fn=custom_collate_fn
-    )
-
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-
-    print(colored(f"Starting training from epoch {start_epoch+1}...", "blue"))
-
     for epoch in range(start_epoch, args.epochs):
         model.mlp_projector.train()
         if not args.freeze_vision_tower:
@@ -174,25 +156,25 @@ def main():
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
 
         for batch in progress_bar:
-            # Access data using new keys from custom_collate_fn
-            images = batch['raw_images'] # List of PIL images
+            images = batch['raw_images']
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             
-            # Process images here in the loop
             image_inputs = model.image_processor(images=images, return_tensors="pt").to(device)
 
             optimizer.zero_grad()
-            logits = model(image_inputs['pixel_values'], input_ids)
-
-            num_image_patches = logits.shape[1] - labels.shape[1]
-            logits_for_loss = logits[:, num_image_patches:-1, :]
-            labels_for_loss = labels[:, 1:]
-
-            loss = loss_fn(
-                logits_for_loss.reshape(-1, logits_for_loss.size(-1)),
-                labels_for_loss.reshape(-1)
+            
+            # --- CRITICAL FIX START ---
+            # Pass labels directly to the model. The model handles the shifting and loss calculation.
+            # This also handles the concatenation of image embeddings internally within the custom forward method.
+            outputs = model(
+                images=image_inputs['pixel_values'], 
+                input_ids=input_ids, 
+                labels=labels
             )
+            
+            loss = outputs.loss
+            # --- CRITICAL FIX END ---
 
             loss.backward()
             optimizer.step()
@@ -204,15 +186,13 @@ def main():
         loss_history.append(avg_epoch_loss)
         print(colored(f"Epoch {epoch + 1} complete. Average Loss: {avg_epoch_loss:.4f}", "green"))
 
-        # WandB log
         wandb.log({"epoch": epoch + 1, "train_loss": avg_epoch_loss})
 
-        # Save Checkpoint (Resumable)
         if (epoch + 1) % args.save_every == 0 or (epoch + 1) == args.epochs:
             checkpoint_path = os.path.join(args.output_dir, "checkpoint_latest.pth")
             
             torch.save({
-                'epoch': epoch + 1,  # Save the NEXT epoch index
+                'epoch': epoch + 1, 
                 'mlp_projector_state_dict': model.mlp_projector.state_dict(),
                 'vision_tower_state_dict': model.vision_tower.state_dict(),
                 'language_model_state_dict': model.language_model.state_dict(),
@@ -220,7 +200,7 @@ def main():
                 'loss_history': loss_history,
                 'wandb_run_id': wandb_run_id,
                 'run_name': args.run_name,
-                'args': args # Save args for reference
+                'args': args 
             }, checkpoint_path)
             
             print(colored(f"Resumable checkpoint saved: {checkpoint_path}", "yellow"))
@@ -228,7 +208,6 @@ def main():
 
     print(colored("Training finished successfully!", "green"))
 
-    # Save Final Model (Compatible with evaluation script)
     model_save_path = os.path.join(args.output_dir, "final_model.pth")
     torch.save({
         'model_state_dict': model.mlp_projector.state_dict(),
@@ -240,12 +219,13 @@ def main():
         'batch_size': args.batch_size,
         'learning_rate': args.lr,
         'penalty_weight': args.penalty_weight,
-        'wandb_run_id': wandb_run_id
+        'wandb_run_id': wandb_run_id,
+        'run_name': args.run_name,
+        'args': args
     }, model_save_path)
     wandb.save(model_save_path)
     print(colored(f"Full model saved to: {model_save_path}", "green"))
 
-    # Plotting
     try:
         plt.style.use('seaborn-v0_8')
     except:
