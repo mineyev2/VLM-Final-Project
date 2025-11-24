@@ -129,7 +129,7 @@ class MultimodalQwenModel(nn.Module):
         )
         self.lidar_encoder = self.lidar_encoder.to(device)
         
-        lidar_hidden_size = clip_hidden_size  # SST outputs CLIP-compatible features
+        lidar_hidden_size = 6400  # Lidar encoder outputs 6400 features (80x80 grid)
         print(f"  ✓ SST encoder loaded")
         print(f"  ✓ Output size: {lidar_hidden_size}")
         
@@ -261,7 +261,7 @@ class MultimodalQwenModel(nn.Module):
             # We take the CLS token (first token)
             image_features = self.vision_tower(pixel_values=images).last_hidden_state
             # Use mean pooling instead of just CLS token for richer features
-            image_features = image_features.mean(dim=1)  # [B, hidden_dim]
+            # image_features = image_features.mean(dim=1)  # [B, hidden_dim]
         
         return image_features
     
@@ -276,11 +276,11 @@ class MultimodalQwenModel(nn.Module):
             [B, hidden_dim] LiDAR features
         """
         with torch.no_grad() if self.freeze_encoders else torch.enable_grad():
-            lidar_features = self.lidar_encoder(point_clouds)  # [B, hidden_dim]
+            lidar_features = self.lidar_encoder(point_clouds, no_pooling=True)  # [B, hidden_dim]
         
         return lidar_features
     
-    def forward(self, images, point_clouds, input_ids, use_vision=True, use_lidar=True):
+    def forward(self, images, point_clouds, input_ids, use_vision=True, use_lidar=True, labels=None):
         """
         Forward pass for training.
         
@@ -307,35 +307,56 @@ class MultimodalQwenModel(nn.Module):
                     images=images,
                     return_tensors="pt"
                 )
-                images = processed.pixel_values.to(self.device)
+                images = processed.pixel_values.to(self.device) # [B, C, W, H]
             
             # Encode images
-            image_features = self.encode_image(images)  # [B, clip_dim]
+            # print("Images shape: ", images.shape)
+            image_features = self.encode_image(images)  # [B, num_patches, CLIP_dim]
+            # print("Image features shape: ", image_features.shape)
             # Project to LLM space
-            projected_vision = self.vision_projector(image_features.to(torch.bfloat16))  # [B, qwen_dim]
-            multimodal_features.append(projected_vision.unsqueeze(1))  # [B, 1, qwen_dim]
+            projected_vision = self.vision_projector(image_features.to(torch.bfloat16))  # [B, num_patches, qwen_dim]
+            # print("Projected vision shape: ", projected_vision.shape)
+            # multimodal_features.append(projected_vision.unsqueeze(1))  # [B, 1, qwen_dim]
         
         if use_lidar and point_clouds is not None and len(point_clouds) > 0:
             # Encode LiDAR
-            lidar_features = self.encode_lidar(point_clouds)  # [B, lidar_dim]
+            print("Point clouds length: ", len(point_clouds))
+            print("Point clouds: ", [pc.shape for pc in point_clouds])
+            lidar_features = self.encode_lidar(point_clouds)  # [B, 128, 80, 80]
+            print("LiDAR features shape: ", lidar_features.shape)
+            
+            # Reshape from [B, C, H, W] to [B, C, H*W]
+            B, C, H, W = lidar_features.shape
+            lidar_features = lidar_features.reshape(B, C, H * W)  # [B, C, H*W]
+            print("LiDAR features reshaped: ", lidar_features.shape)
+            
             # Project to LLM space
-            projected_lidar = self.lidar_projector(lidar_features.to(torch.bfloat16))  # [B, qwen_dim]
-            multimodal_features.append(projected_lidar.unsqueeze(1))  # [B, 1, qwen_dim]
+            projected_lidar = self.lidar_projector(lidar_features.to(torch.bfloat16))  # [B, H*W, qwen_dim]
+            print("Projected LiDAR shape: ", projected_lidar.shape)
+            # multimodal_features.append(projected_lidar.unsqueeze(1))  # [B, 1, qwen_dim]
         
         # Get text embeddings
         text_embeddings = self.language_model.get_input_embeddings()(input_ids)  # [B, seq_len, qwen_dim]
         
         # Concatenate all features: [multimodal tokens] + [text tokens]
-        if len(multimodal_features) > 0:
-            multimodal_tokens = torch.cat(multimodal_features, dim=1)  # [B, num_modalities, qwen_dim]
-            combined_embeddings = torch.cat([multimodal_tokens, text_embeddings], dim=1)
+        combined_embeddings = torch.cat([projected_vision, projected_lidar, text_embeddings], dim=1) if (use_vision and use_lidar) else text_embeddings
+
+        # 5. Adjust Labels for Training
+        if labels is not None:
+            # Create a filler for image tokens (ignore index -100)
+            image_labels_len = projected_vision.shape[1]
+            lidar_labels_len = projected_lidar.shape[1]
+            batch_size = labels.shape[0]
+            
+            multimodal_labels = torch.full((batch_size, image_labels_len+lidar_labels_len), -100, dtype=labels.dtype, device=self.device)
+            combined_labels = torch.cat([multimodal_labels, labels], dim=1)
         else:
-            combined_embeddings = text_embeddings
+            combined_labels = None
         
         # Forward through LLM
-        outputs = self.language_model(inputs_embeds=combined_embeddings)
+        outputs = self.language_model(inputs_embeds=combined_embeddings, labels=combined_labels)
         
-        return outputs.logits
+        return outputs
     
     def generate_trajectory(self, images, point_clouds, ego_positions):
         """
@@ -369,12 +390,18 @@ class MultimodalQwenModel(nn.Module):
                 
                 image_features = self.encode_image(images)
                 projected_vision = self.vision_projector(image_features.to(torch.bfloat16))
-                multimodal_features.append(projected_vision.unsqueeze(1))
+                # multimodal_features.append(projected_vision.unsqueeze(1))
             
             if point_clouds is not None and len(point_clouds) > 0:
                 lidar_features = self.encode_lidar(point_clouds)
+
+                # Reshape from [B, C, H, W] to [B, C, H*W]
+                B, C, H, W = lidar_features.shape
+                lidar_features = lidar_features.reshape(B, C, H * W)  # [B, C, H*W]
+
                 projected_lidar = self.lidar_projector(lidar_features.to(torch.bfloat16))
-                multimodal_features.append(projected_lidar.unsqueeze(1))
+
+                # multimodal_features.append(projected_lidar.unsqueeze(1))
             
             # Create prompts
             prompts = []
@@ -397,11 +424,13 @@ class MultimodalQwenModel(nn.Module):
             text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
             
             # Combine features
-            if len(multimodal_features) > 0:
-                multimodal_tokens = torch.cat(multimodal_features, dim=1)
-                combined_embeddings = torch.cat([multimodal_tokens, text_embeddings], dim=1)
-            else:
-                combined_embeddings = text_embeddings
+            # if len(multimodal_features) > 0:
+            #     multimodal_tokens = torch.cat(multimodal_features, dim=1)
+            #     combined_embeddings = torch.cat([multimodal_tokens, text_embeddings], dim=1)
+            # else:
+            #     combined_embeddings = text_embeddings
+            combined_embeddings = torch.cat([projected_vision, projected_lidar, text_embeddings], dim=1)
+
             
             # Generate
             outputs = self.language_model.generate(
