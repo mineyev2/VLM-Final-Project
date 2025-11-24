@@ -643,11 +643,14 @@ def main():
                     # Verify shapes match
                     assert logits.shape[1] == labels.shape[1], \
                         f"Shape mismatch: logits {logits.shape[1]} vs labels {labels.shape[1]}"
-                
-                # Compute loss
+
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+
+                # 3. Compute Loss
                 loss = loss_fn(
-                    logits.reshape(-1, logits.size(-1)),
-                    labels.reshape(-1)
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1)
                 )
                 
             except Exception as e:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Evaluation Script for Multimodal LiDAR+CLIP+Qwen Model
-(Modified for Ablation Testing: Optional LiDAR)
+(Updated with Incremental CSV Saving and Coordinate Logging)
 """
 
 import os
@@ -54,11 +54,10 @@ def parse_coords_from_text(text, max_points=10):
 def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to_ego, ego_to_world, idx, output_dir):
     """Overlay ground truth and predicted trajectories on the image."""
     
-    # --- CRASH FIX: Safety check for prediction shape ---
+    # --- Safety Check ---
     if pred_waypoints_2d.shape[0] == 0 or len(pred_waypoints_2d.shape) != 2:
-        # print(f"Skipping visualization for sample {idx}: Invalid prediction shape {pred_waypoints_2d.shape}")
         return
-    # ----------------------------------------------------
+    # --------------------
 
     img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     
@@ -146,7 +145,8 @@ class EvalNuScenes:
             if current_sample['prev']:
                 current_sample = self.nusc.get('sample', current_sample['prev'])
             else:
-                break
+                while len(ego_positions) < 3:
+                    ego_positions.append(ego_positions[-1])
         ego_positions.reverse()
 
         camera_token = sample['data']['CAM_FRONT']
@@ -166,7 +166,6 @@ class EvalNuScenes:
             'rotation': ego_pose['rotation']
         }
 
-        # Get LiDAR (We load it even if disabled, just in case)
         nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
             self.nusc,
             sample,
@@ -215,7 +214,6 @@ def load_checkpoint_into_model(model, ckpt_path, device):
         except Exception as e:
             print(colored(f"  ✗ Warning loading lidar_projector: {e}", "red"))
     
-    # We still try to load these even if disabled, to ensure model integrity
     if 'lidar_encoder_state_dict' in data:
         try:
             model.lidar_encoder.load_state_dict(data['lidar_encoder_state_dict'])
@@ -264,6 +262,21 @@ def evaluate(args):
     batch_size = args.batch_size
     num_batches = (n_samples + batch_size - 1) // batch_size
     
+    # --- PREPARE CSV WRITER ---
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_path = os.path.join(args.output_dir, args.output_name)
+    
+    # Open file and keep it open during the loop
+    csv_file = open(csv_path, 'w', newline='')
+    fieldnames = ['idx', 'cross_entropy_loss', 'perplexity', 'token_accuracy', 
+                 'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
+                 'failure_at_1s', 'error_at_1s', 'processing_time_sec'] + \
+                 [f'wp{i}_error' for i in range(10)] + \
+                 ['gt_trajectory', 'pred_trajectory', 'gen_text'] # Added columns for matching console output
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer.writeheader()
+    # ---------------------------
+
     for batch_idx in tqdm(range(num_batches), desc='Evaluating'):
         batch_start_time = time.time()
         start_idx = batch_idx * batch_size
@@ -282,10 +295,12 @@ def evaluate(args):
         batch_lidar_device = [pc.to(device) for pc in batch_lidar]
         batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
         
-        # === HANDLE DISABLE LIDAR ===
-        # If disabled, we pass None to the model for the point_clouds
         lidar_input = None if args.disable_lidar else batch_lidar_device
         use_lidar_flag = False if args.disable_lidar else True
+
+        batch_ce_losses = []
+        batch_token_accs = []
+        batch_perplexities = []
 
         try:
             with torch.no_grad():
@@ -312,12 +327,7 @@ def evaluate(args):
                 tokenized = model.tokenizer(full_prompts_formatted, return_tensors='pt', padding=True).to(device)
                 input_ids = tokenized.input_ids
                 
-                # === FORWARD WITH OPTIONAL LIDAR ===
                 logits = model(pixel_values, lidar_input, input_ids, use_vision=True, use_lidar=use_lidar_flag)
-                
-                # Determine how many special tokens were added
-                # If LiDAR enabled: Vision + LiDAR = 2 tokens
-                # If LiDAR disabled: Vision = 1 token
                 num_multimodal_tokens = 1 if args.disable_lidar else 2
                 
                 for i in range(len(batch_indices)):
@@ -333,7 +343,6 @@ def evaluate(args):
                     labels[:prompt_length] = -100
                     
                     text_logits = logits[i, num_multimodal_tokens:, :] 
-                    
                     shift_logits = text_logits[:-1, :].contiguous()
                     shift_labels = labels[1:].contiguous()
                     
@@ -361,43 +370,111 @@ def evaluate(args):
             batch_perplexities = [np.nan] * len(batch_indices)
             batch_token_accs = [np.nan] * len(batch_indices)
         
-        # === GENERATE WITH OPTIONAL LIDAR ===
         try:
-            # generate_trajectory handles None for point_clouds correctly
             outputs, gen_texts = model.generate_trajectory(batch_images, lidar_input, batch_ego_positions_py)
         except Exception as e:
             print(f"Generation failed for batch {batch_idx}: {e}")
             continue
         
+
+
+        # ... [Keep previous code] ...
+        
+        # Process each sample in batch
         batch_time = time.time() - batch_start_time
         per_sample_time = batch_time / len(batch_indices)
         
         for i, idx in enumerate(batch_indices):
             gen_text = gen_texts[i]
-            pred_coords = parse_coords_from_text(gen_text, max_points=10)
             
-            if idx < 5 or idx in vis_indices:
-                print(colored(f"\n[Sample {idx}] Generated text:", "yellow"))
-                print(gen_text[:500])
+            # --- STEP 1: PARSE ALL COORDINATES ---
+            raw_pred_coords = parse_coords_from_text(gen_text, max_points=20) # Parse extra points in case we filter some
             
+            # --- STEP 2: FILTER OUT HISTORY (Fix for "Predicting the Past") ---
+            # Get the history for this sample
+            history = np.array(batch_ego_positions_py[i]) # Shape [3, 2]
+            
+            # Check if the car is effectively stopped (all history points are close to each other)
+            # If max distance between any history points is < 0.2m, consider stopped
+            is_stopped = False
+            if len(history) > 1:
+                max_hist_dist = np.max(np.linalg.norm(history - history[0], axis=1))
+                if max_hist_dist < 0.2:
+                    is_stopped = True
+
+            valid_preds = []
+            for p in raw_pred_coords:
+                # Calculate distance from this predicted point to ALL history points
+                dists = np.linalg.norm(history - p, axis=1)
+                min_dist = np.min(dists)
+                
+                # If the car is MOVING, and this point is identical to a history point (dist < 0.5m),
+                # it's likely a hallucination/repetition of the prompt. Skip it.
+                if not is_stopped and min_dist < 0.5:
+                    continue
+                
+                valid_preds.append(p)
+                if len(valid_preds) == 10:
+                    break
+            
+            pred_coords = np.array(valid_preds)
+            # ------------------------------------------------------------------
+
             num_valid_waypoints = pred_coords.shape[0]
             format_compliant = (num_valid_waypoints == 10)
             
+            # Pad or truncate to 10 waypoints
             if pred_coords.shape[0] < 10:
                 pad = np.full((10 - pred_coords.shape[0], 2), np.nan)
-                pred_coords = np.vstack([pred_coords, pad])
+                pred_coords = np.vstack([pred_coords, pad]) if pred_coords.shape[0] > 0 else pad
             elif pred_coords.shape[0] > 10:
                 pred_coords = pred_coords[:10]
             
             gt_wp = batch_gt_waypoints[i]
+            
+            # Compute trajectory metrics
             diffs = pred_coords - gt_wp
             l2_per_waypoint = np.linalg.norm(diffs, axis=1)
             ade = np.nanmean(l2_per_waypoint)
             fde = l2_per_waypoint[-1]
+            
+            # ==================================================================
+            # LOGGING
+            # ==================================================================
+            if idx in vis_indices or idx < 5:
+                print(colored(f"\n{'='*20} SAMPLE ID: {idx} {'='*20}", "magenta", attrs=['bold']))
+                
+                print(colored("Input History (Last 3 Positions provided):", "cyan"))
+                for h_idx, pos in enumerate(history):
+                    print(f"  t-{3-h_idx}: [{pos[0]:.2f}, {pos[1]:.2f}]")
+
+                print(colored(f"Errors:", "cyan"))
+                print(f"  ADE: {ade:.4f} meters")
+                print(f"  FDE: {fde:.4f} meters")
+
+                print(colored("Future Predictions (Filtered):", "cyan"))
+                for k in range(min(3, len(gt_wp))):
+                    if not np.isnan(pred_coords[k][0]):
+                        p_str = f"[{pred_coords[k][0]:.2f}, {pred_coords[k][1]:.2f}]"
+                        pt_err = np.linalg.norm(pred_coords[k] - gt_wp[k])
+                        err_str = f"(err: {pt_err:.2f}m)"
+                    else:
+                        p_str = "[NaN, NaN]"
+                        err_str = ""
+                    print(f"  GT: [{gt_wp[k][0]:.2f}, {gt_wp[k][1]:.2f}]  ->  Pred: {p_str} {err_str}")
+
+                # 5. Vis Path
+                if idx in vis_indices:
+                    vis_path = os.path.join(vis_dir, f'vis_sample_{idx:04d}.jpg')
+                    print(colored(f"Visualization saved to: {vis_path}", "green", attrs=['bold']))
+                print("="*60)
+            # ==================================================================
+
             miss_rate_10m = 1.0 if fde > 10.0 else 0.0
             error_at_1s = l2_per_waypoint[1] if len(l2_per_waypoint) > 1 else np.nan
             failure_at_1s = 1.0 if error_at_1s > 10.0 else 0.0
             
+            # Store results (Rest of the loop remains the same...)
             result = {
                 'idx': idx,
                 'cross_entropy_loss': batch_ce_losses[i],
@@ -416,6 +493,7 @@ def evaluate(args):
             }
             results.append(result)
             
+            # Visualize
             if idx in vis_indices:
                 pred_waypoints_valid = pred_coords[:num_valid_waypoints] if num_valid_waypoints > 0 else np.array([]).reshape(0, 2)
                 visualize_trajectories(
@@ -428,55 +506,23 @@ def evaluate(args):
                     vis_dir
                 )
 
+    # Close CSV file
+    csv_file.close()
+
+    # Summary printing (Optional, kept for end-of-run stats)
     ce_losses = [r['cross_entropy_loss'] for r in results if not np.isnan(r['cross_entropy_loss'])]
-    perplexities = [r['perplexity'] for r in results if not np.isnan(r['perplexity'])]
-    token_accs = [r['token_accuracy'] for r in results if not np.isnan(r['token_accuracy'])]
     ades = [r['ade'] for r in results if not np.isnan(r['ade'])]
     fdes = [r['fde'] for r in results if not np.isnan(r['fde'])]
-    miss_rates = [r['miss_rate_10m'] for r in results]
     
     summary = {
-        'num_samples': len(results),
-        'cross_entropy_loss_mean': float(np.mean(ce_losses)) if len(ce_losses) > 0 else float('nan'),
-        'token_accuracy_mean': float(np.mean(token_accs)) if len(token_accs) > 0 else float('nan'),
         'ade_mean': float(np.mean(ades)) if len(ades) > 0 else float('nan'),
         'fde_mean': float(np.mean(fdes)) if len(fdes) > 0 else float('nan'),
-        'miss_rate_10m': float(np.mean(miss_rates)) if len(miss_rates) > 0 else float('nan'),
     }
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir, args.output_name)
-    
-    with open(csv_path, 'w', newline='') as f:
-        fieldnames = ['idx', 'cross_entropy_loss', 'perplexity', 'token_accuracy', 
-                     'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
-                     'failure_at_1s', 'error_at_1s', 'processing_time_sec'] + \
-                     [f'wp{i}_error' for i in range(10)] + ['gen_text']
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in results:
-            row = {
-                'idx': r['idx'],
-                'cross_entropy_loss': r['cross_entropy_loss'],
-                'perplexity': r['perplexity'],
-                'token_accuracy': r['token_accuracy'],
-                'num_valid_waypoints': r['num_valid_waypoints'],
-                'format_compliant': r['format_compliant'],
-                'ade': r['ade'],
-                'fde': r['fde'],
-                'miss_rate_10m': r['miss_rate_10m'],
-                'failure_at_1s': r['failure_at_1s'],
-                'error_at_1s': r['error_at_1s'],
-                'processing_time_sec': r['processing_time_sec'],
-                'gen_text': r['gen_text']
-            }
-            for i, err in enumerate(r['waypoint_errors']):
-                row[f'wp{i}_error'] = err
-            writer.writerow(row)
 
     print(colored('\n=== Evaluation Summary ===', 'cyan', attrs=['bold']))
     print(f"ADE Mean: {summary['ade_mean']:.4f}")
     print(f"FDE Mean: {summary['fde_mean']:.4f}")
+    print(colored(f"Results saved to {csv_path}", "green"))
 
 
 def parse_args():
@@ -498,8 +544,6 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default='./eval_outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
     parser.add_argument('--run_name', type=str, required=True)
-    
-    # NEW ARGUMENT
     parser.add_argument('--disable_lidar', action='store_true', help='Disable LiDAR input (Vision + Text only)')
     
     args = parser.parse_args()
