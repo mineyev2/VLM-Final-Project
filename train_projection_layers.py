@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument(
         "--version",
         type=str,
-        default="v1.0-mini",
+        default="v1.0-trainval",
         choices=["v1.0-mini", "v1.0-trainval", "v1.0-test"],
         help="nuScenes dataset version"
     )
@@ -423,6 +423,9 @@ def main():
     )
     
     args = parse_args()
+
+    if args.version == "v1.0-mini":
+        args.dataroot = "/home/hice1/rmineyev3/scratch/VLM-Final-Project/datasets/NuScenes"
     
     # Auto-generate run name
     if args.run_name is None:
@@ -614,44 +617,47 @@ def main():
             
             # Forward pass
             try:
-                logits = model(
+                outputs = model(
                     images=images,
                     point_clouds=point_clouds,
                     input_ids=input_ids,
+                    labels=labels,
                     use_vision=True,
                     use_lidar=(point_clouds is not None)
                 )
                 
-                # ================================================================
-                # FIX: Adjust labels to match logits length
-                # ================================================================
-                if logits.shape[1] != labels.shape[1]:
-                    # Calculate number of multimodal tokens
-                    num_multimodal_tokens = logits.shape[1] - labels.shape[1]
+                # # ================================================================
+                # # FIX: Adjust labels to match logits length
+                # # ================================================================
+                # if logits.shape[1] != labels.shape[1]:
+                #     # Calculate number of multimodal tokens
+                #     num_multimodal_tokens = logits.shape[1] - labels.shape[1]
                     
-                    # Create padding with -100 (ignore_index)
-                    padding = torch.full(
-                        (labels.shape[0], num_multimodal_tokens),
-                        -100,
-                        dtype=labels.dtype,
-                        device=labels.device
-                    )
+                #     # Create padding with -100 (ignore_index)
+                #     padding = torch.full(
+                #         (labels.shape[0], num_multimodal_tokens),
+                #         -100,
+                #         dtype=labels.dtype,
+                #         device=labels.device
+                #     )
                     
-                    # Concatenate padding before labels
-                    labels = torch.cat([padding, labels], dim=1)
+                #     # Concatenate padding before labels
+                #     labels = torch.cat([padding, labels], dim=1)
                     
-                    # Verify shapes match
-                    assert logits.shape[1] == labels.shape[1], \
-                        f"Shape mismatch: logits {logits.shape[1]} vs labels {labels.shape[1]}"
+                #     # Verify shapes match
+                #     assert logits.shape[1] == labels.shape[1], \
+                #         f"Shape mismatch: logits {logits.shape[1]} vs labels {labels.shape[1]}"
 
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
+                # shift_logits = logits[..., :-1, :].contiguous()
+                # shift_labels = labels[..., 1:].contiguous()
 
-                # 3. Compute Loss
-                loss = loss_fn(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1)
-                )
+                # # 3. Compute Loss
+                # loss = loss_fn(
+                #     shift_logits.view(-1, shift_logits.size(-1)),
+                #     shift_labels.view(-1)
+                # )
+
+                loss = outputs.loss
                 
             except Exception as e:
                 logging.error(f"Forward pass failed: {e}")

@@ -1,9 +1,11 @@
-import os, sys
+import os
+import sys
 from termcolor import colored
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
+from pyquaternion import Quaternion
 
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
@@ -12,99 +14,94 @@ class NuScenesDataset(Dataset):
     def __init__(self, version, dataroot, tokenizer, prompt_part1, prompt_part2, nsweeps=5):
         """
         Initialize the NuScenes dataset for use with PyTorch.
-
-        Args:
-            version (str): Version of the NuScenes dataset to use (e.g., 'v1.0-mini', 'v1.0-trainval').
-            dataroot (str): Root directory where the NuScenes dataset is stored.
-            tokenizer (Tokenizer): Text tokenizer to use for the dataset.
-            prompt_part1 (str): First part of the prompt to use for the dataset.
-            prompt_part2 (str): Second part of the prompt to use for the dataset.
-            nsweeps (int): Number of LiDAR sweeps to combine for each sample.
+        Serves EGOCENTRIC (Local) coordinates with metadata for Global reconstruction.
         """
-
         print(colored(f"Initializing NuScenes dataset with version {version} at {dataroot}", "cyan"))
-        self.nusc = NuScenes(version=version, dataroot=dataroot)
-        self.nsweeps = nsweeps # TODO: Figure out this value
+        self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
+        self.nsweeps = nsweeps 
 
         self.tokenizer = tokenizer
         self.prompt_part1 = prompt_part1
         self.prompt_part2 = prompt_part2
 
-        # Rewrite so all samples are in a list, for easy indexing
-        self.sample_tokens = []
-
-        print(colored("Loading sample tokens from all scenes into a list...", "cyan"))
+        # Create list of samples
+        self.samples = []
         for scene in self.nusc.scene:
-
-            # Get number of samples
             nbr_samples = scene['nbr_samples']
-
-            # Ensure we have at least 2 previous frames and 10 future frames
-            # Total frames needed per sample: 1 (current) + 2 (history) + 10 (future) = 13
-            if nbr_samples < 13:
+            if nbr_samples < 20: 
                 continue
-
-            first_sample_token = scene['first_sample_token']
-            sample = self.nusc.get('sample', first_sample_token)
-
-            # Skip the first two samples of each scene as they don't have enough history
-            for _ in range(2):
+            
+            sample = self.nusc.get('sample', scene['first_sample_token'])
+            
+            # Skip first 9 samples to ensure 10 frames of history
+            for _ in range(9): 
                 sample = self.nusc.get('sample', sample['next'])
-
-            # Add the remaining valid samples
-            for _ in range(nbr_samples - 12):
-                self.sample_tokens.append(sample['token'])
+                
+            # Add samples (stop 10 frames before end for future ground truth)
+            for _ in range(nbr_samples - 19):
+                self.samples.append(sample)
                 sample = self.nusc.get('sample', sample['next'])
-
-        print(colored(f"Loaded {len(self.sample_tokens)} samples from {len(self.nusc.scene)} scenes.", "green"))
 
     def __len__(self):
-        return len(self.sample_tokens)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        """
-        Get a data sample from the dataset.
+        sample = self.samples[idx]
 
-        Args:
-            idx (int): Index of the sample to retrieve.
-        Returns:
-            dict: A dictionary containing:
-                - 'image': Front camera image as a torch tensor (H, W, 3).
-                    - NOTE: This value is not normalized (may need to divide by 255)
-                - 'lidar': LiDAR point cloud as a torch tensor (4, N).
-                    - NOTE: nsweeps=5 (5 360deg lidar sensor rotations), unsure if this is good/practical approach
-                - 'ego_positions': Last 3 ego vehicle XY positions as a torch tensor (3, 2).
-                    - NOTE: This is used to get the historical trajectory of the ego vehicle.
-                - 'waypoints': 10 future waypoints as a torch tensor (10, 2).
-                    - NOTE: car location is retrieved from its position of when
-                            the image was taken, rather than when the LIDAR was taken.
-                            This isn't a huge difference, but worthy of note.
-        """
+        # 1. Get Current Ego Pose (Reference Frame)
+        cam_token = sample['data']['CAM_FRONT']
+        cam_data = self.nusc.get('sample_data', cam_token)
+        ego_pose_curr = self.nusc.get('ego_pose', cam_data['ego_pose_token'])
+        
+        ego_trans = np.array(ego_pose_curr['translation'])
+        ego_rot = Quaternion(ego_pose_curr['rotation'])
 
-        # Get sample at idx
-        sample_token = self.sample_tokens[idx]
-        sample = self.nusc.get('sample', sample_token)
-
-        # Get Last 3 Ego Vehicle XY Positions
-        ego_positions = []
-        current_sample = sample
-        # Get current and two previous positions
-        for _ in range(3):
-            cam_data = self.nusc.get('sample_data', current_sample['data']['CAM_FRONT'])
-            ego_pose = self.nusc.get('ego_pose', cam_data['ego_pose_token'])
-            ego_positions.append(ego_pose['translation'][:2]) # Append [x, y]
-            # Move to the previous sample
-            if current_sample['prev']:
-                current_sample = self.nusc.get('sample', current_sample['prev'])
+        # 2. Get History (10 frames)
+        history_points = []
+        curr_hist = sample
+        for _ in range(10):
+            c_data = self.nusc.get('sample_data', curr_hist['data']['CAM_FRONT'])
+            e_pose = self.nusc.get('ego_pose', c_data['ego_pose_token'])
+            history_points.append(np.array(e_pose['translation']))
+            
+            if curr_hist['prev']:
+                curr_hist = self.nusc.get('sample', curr_hist['prev'])
             else:
-                # Pad with the oldest available position if at start of scene
-                while len(ego_positions) < 3:
-                    ego_positions.append(ego_positions[-1])
+                history_points.append(history_points[-1])
+        history_points.reverse()
 
-        ego_positions.reverse() # Order from oldest to newest
-        ego_positions = torch.tensor(ego_positions).float() # 3 x 2
+        # 3. Get Future Ground Truth (10 frames)
+        future_points = []
+        curr_fut = sample
+        for _ in range(10):
+            if curr_fut['next'] == '': 
+                break
+            curr_fut = self.nusc.get('sample', curr_fut['next'])
+            c_data = self.nusc.get('sample_data', curr_fut['data']['CAM_FRONT'])
+            e_pose = self.nusc.get('ego_pose', c_data['ego_pose_token'])
+            future_points.append(np.array(e_pose['translation']))
+        
+        while len(future_points) < 10:
+            future_points.append(future_points[-1] if len(future_points) > 0 else ego_trans)
 
-        # Get LiDAR point cloud with nsweeps
+        # 4. Transform to Local Coordinates
+        history_local = []
+        for p in history_points:
+            diff = p - ego_trans
+            local_p = ego_rot.inverse.rotate(diff)
+            history_local.append(local_p[:2])
+
+        future_local = []
+        for p in future_points:
+            diff = p - ego_trans
+            local_p = ego_rot.inverse.rotate(diff)
+            future_local.append(local_p[:2])
+
+        # 5. Load Image
+        image_path = os.path.join(self.nusc.dataroot, cam_data['filename'])
+        image = Image.open(image_path).convert('RGB')
+
+        # 6. Load lidar
         nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
             self.nusc,
             sample,
@@ -115,48 +112,47 @@ class NuScenesDataset(Dataset):
         )
         torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points.T).float() # [N,4]
 
-        # Get front camera image
-        camera_token = sample['data']['CAM_FRONT']
-        camera_data = self.nusc.get('sample_data', camera_token)
-        image_path = os.path.join(self.nusc.dataroot, camera_data['filename'])
-        image = Image.open(image_path).convert('RGB')  # H x W x 3
-
-        # Get waypoints
-        waypoints = []
-        current_sample = sample
-        for _ in range(10): # Get 10 future waypoints
-            next_sample_token = current_sample['next']
-            next_sample = self.nusc.get('sample', next_sample_token)
-            next_camera_data = self.nusc.get('sample_data', next_sample['data']['CAM_FRONT'])
-            next_ego_pose = self.nusc.get('ego_pose', next_camera_data['ego_pose_token'])['translation']
-            waypoints.append(next_ego_pose[:2]) # Only x, y
-            current_sample = next_sample
         
-        waypoints = torch.tensor(waypoints).float()  # 10 x 2
-
-        # Prepare Text and Tokenize
-        pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_positions])
+        # 6. Format Text Prompt (CORRECTED FORMATTING)
+        pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in history_local])
         prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
         
-        wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in waypoints])
-        target_string = "Future Trajectory: " + wp_str
-
-        full_text = prompt + target_string
-        input_ids = self.tokenizer(full_text, return_tensors="pt").input_ids.squeeze(0)
+        # FIX: Add outer brackets to match the prompt's requested format: "[[x,y], [x,y]...]"
+        wp_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in future_local])
+        target_text = "Future Trajectory: [" + wp_str + "]"
+        
+        full_text = prompt + target_text
+        
+        # 7. Tokenize & Mask
+        input_ids = self.tokenizer(
+            full_text, 
+            return_tensors="pt", 
+            padding="max_length", 
+            max_length=512, 
+            truncation=True
+        ).input_ids.squeeze(0)
         
         labels = input_ids.clone()
         
-        # Mask out the prompt part of the labels
-        prompt_tokens = self.tokenizer(prompt, return_tensors="pt").input_ids
-        prompt_length = prompt_tokens.shape[1]
-
-        # The PyTorch nn.CrossEntropyLoss function has a parameter called ignore_index, which is set to -100 by default.
-        # When it calculates the loss, it completely skips any position where the label is -100.
-        labels[:prompt_length] = -100
+        # Calculate prompt length for masking
+        # Note: We tokenize the prompt separately to find the boundary
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.squeeze(0)
+        prompt_len = prompt_ids.shape[0]
+        
+        # Apply -100 mask to the prompt part (loss is only calculated on target_text)
+        if prompt_len < labels.shape[0]:
+            labels[:prompt_len] = -100
+        else:
+            labels[:] = -100 # Safety fallback if truncation cut off the target
 
         return {
-            "image": image,
-            "lidar": torch_pointcloud,
-            "input_ids": input_ids,
-            "labels": labels
+            'image': image,
+            'lidar': torch_pointcloud,
+            'input_ids': input_ids,
+            'labels': labels,
+            'ego_positions': history_local,
+            'waypoints': future_local,
+            'ego_translation': ego_trans,
+            'ego_rotation': ego_rot.elements
         }
+    

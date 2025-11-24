@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
@@ -251,7 +250,6 @@ def evaluate(args):
     
     model.eval()
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
     ds = EvalNuScenes(args.version, args.dataroot, model.prompt_part1, model.prompt_part2, nsweeps=args.nsweeps)
     results = []
 
@@ -268,8 +266,7 @@ def evaluate(args):
     
     # Open file and keep it open during the loop
     csv_file = open(csv_path, 'w', newline='')
-    fieldnames = ['idx', 'cross_entropy_loss', 'perplexity', 'token_accuracy', 
-                 'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
+    fieldnames = ['idx', 'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
                  'failure_at_1s', 'error_at_1s', 'processing_time_sec'] + \
                  [f'wp{i}_error' for i in range(10)] + \
                  ['gt_trajectory', 'pred_trajectory', 'gen_text'] # Added columns for matching console output
@@ -298,78 +295,6 @@ def evaluate(args):
         lidar_input = None if args.disable_lidar else batch_lidar_device
         use_lidar_flag = False if args.disable_lidar else True
 
-        batch_ce_losses = []
-        batch_token_accs = []
-        batch_perplexities = []
-
-        try:
-            with torch.no_grad():
-                batch_prompts = []
-                batch_targets = []
-                for ego_pos, gt_wp in zip(batch_ego_positions_py, batch_gt_waypoints):
-                    pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_pos])
-                    prompt = f"{model.prompt_part1}[{pos_str}]\n{model.prompt_part2}"
-                    wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in gt_wp])
-                    target_string = "Future Trajectory: " + wp_str
-                    batch_prompts.append(prompt)
-                    batch_targets.append(target_string)
-                
-                full_texts = [p + t for p, t in zip(batch_prompts, batch_targets)]
-                full_prompts_formatted = [
-                    model.tokenizer.apply_chat_template(
-                        [{"role": "user", "content": ft}],
-                        tokenize=False,
-                        add_generation_prompt=False
-                    )
-                    for ft in full_texts
-                ]
-                
-                tokenized = model.tokenizer(full_prompts_formatted, return_tensors='pt', padding=True).to(device)
-                input_ids = tokenized.input_ids
-                
-                logits = model(pixel_values, lidar_input, input_ids, use_vision=True, use_lidar=use_lidar_flag)
-                num_multimodal_tokens = 1 if args.disable_lidar else 2
-                
-                for i in range(len(batch_indices)):
-                    prompt_formatted = model.tokenizer.apply_chat_template(
-                        [{"role": "user", "content": batch_prompts[i]}],
-                        tokenize=False,
-                        add_generation_prompt=False
-                    )
-                    prompt_tokens = model.tokenizer(prompt_formatted, return_tensors='pt').input_ids
-                    prompt_length = prompt_tokens.shape[1]
-                    
-                    labels = input_ids[i].clone()
-                    labels[:prompt_length] = -100
-                    
-                    text_logits = logits[i, num_multimodal_tokens:, :] 
-                    shift_logits = text_logits[:-1, :].contiguous()
-                    shift_labels = labels[1:].contiguous()
-                    
-                    loss_per_token = loss_fn(shift_logits, shift_labels)
-                    valid_tokens = (shift_labels != -100)
-                    
-                    if valid_tokens.sum() > 0:
-                        ce_loss = loss_per_token[valid_tokens].mean().item()
-                        perplexity = np.exp(ce_loss)
-                        predictions = shift_logits.argmax(dim=-1)
-                        correct = (predictions == shift_labels) & valid_tokens
-                        token_acc = correct.sum().item() / valid_tokens.sum().item()
-                    else:
-                        ce_loss = np.nan
-                        perplexity = np.nan
-                        token_acc = np.nan
-                    
-                    batch_ce_losses.append(ce_loss)
-                    batch_perplexities.append(perplexity)
-                    batch_token_accs.append(token_acc)
-                
-        except Exception as e:
-            print(f"Loss computation failed for batch {batch_idx}: {e}")
-            batch_ce_losses = [np.nan] * len(batch_indices)
-            batch_perplexities = [np.nan] * len(batch_indices)
-            batch_token_accs = [np.nan] * len(batch_indices)
-        
         try:
             outputs, gen_texts = model.generate_trajectory(batch_images, lidar_input, batch_ego_positions_py)
         except Exception as e:
@@ -477,9 +402,6 @@ def evaluate(args):
             # Store results (Rest of the loop remains the same...)
             result = {
                 'idx': idx,
-                'cross_entropy_loss': batch_ce_losses[i],
-                'perplexity': batch_perplexities[i],
-                'token_accuracy': batch_token_accs[i],
                 'num_valid_waypoints': num_valid_waypoints,
                 'format_compliant': format_compliant,
                 'ade': ade,
@@ -510,7 +432,6 @@ def evaluate(args):
     csv_file.close()
 
     # Summary printing (Optional, kept for end-of-run stats)
-    ce_losses = [r['cross_entropy_loss'] for r in results if not np.isnan(r['cross_entropy_loss'])]
     ades = [r['ade'] for r in results if not np.isnan(r['ade'])]
     fdes = [r['fde'] for r in results if not np.isnan(r['fde'])]
     
