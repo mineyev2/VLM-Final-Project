@@ -191,6 +191,17 @@ class MultimodalQwenModel(nn.Module):
         # 5. Prompts for Trajectory Prediction
         # ====================================================================
         print("\n[5/5] Setting up prompts...")
+        # self.prompt_part1 = (
+        #     "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
+        #     "Your last recorded positions (x, y) in the local ego-frame are: "
+        # )
+        # self.prompt_part2 = (
+        #     "It is critical that you output exactly 10 waypoints. "
+        #     "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
+        #     "Please follow this format EXACTLY:\n"
+        #     "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
+        # )
+        
         self.prompt_part1 = (
             "You are a self-driving car. Your task is to predict the future trajectory "
             "based on the camera image, LiDAR point cloud, and your recent movement. "
@@ -202,7 +213,7 @@ class MultimodalQwenModel(nn.Module):
             "For example:\n"
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
         )
-        
+
         print("="*70)
         print("✓ Initialization Complete!")
         print("="*70 + "\n")
@@ -320,19 +331,19 @@ class MultimodalQwenModel(nn.Module):
         
         if use_lidar and point_clouds is not None and len(point_clouds) > 0:
             # Encode LiDAR
-            print("Point clouds length: ", len(point_clouds))
-            print("Point clouds: ", [pc.shape for pc in point_clouds])
+            # print("Point clouds length: ", len(point_clouds))
+            # print("Point clouds: ", [pc.shape for pc in point_clouds])
             lidar_features = self.encode_lidar(point_clouds)  # [B, 128, 80, 80]
-            print("LiDAR features shape: ", lidar_features.shape)
+            # print("LiDAR features shape: ", lidar_features.shape)
             
             # Reshape from [B, C, H, W] to [B, C, H*W]
             B, C, H, W = lidar_features.shape
             lidar_features = lidar_features.reshape(B, C, H * W)  # [B, C, H*W]
-            print("LiDAR features reshaped: ", lidar_features.shape)
+            # print("LiDAR features reshaped: ", lidar_features.shape)
             
             # Project to LLM space
             projected_lidar = self.lidar_projector(lidar_features.to(torch.bfloat16))  # [B, H*W, qwen_dim]
-            print("Projected LiDAR shape: ", projected_lidar.shape)
+            # print("Projected LiDAR shape: ", projected_lidar.shape)
             # multimodal_features.append(projected_lidar.unsqueeze(1))  # [B, 1, qwen_dim]
         
         # Get text embeddings
@@ -372,7 +383,7 @@ class MultimodalQwenModel(nn.Module):
             generated_text: Decoded text
         """
         self.eval()
-        
+
         with torch.no_grad():
             batch_size = len(ego_positions)
             
@@ -422,20 +433,30 @@ class MultimodalQwenModel(nn.Module):
             
             inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
             text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
-            
-            # Combine features
-            # if len(multimodal_features) > 0:
-            #     multimodal_tokens = torch.cat(multimodal_features, dim=1)
-            #     combined_embeddings = torch.cat([multimodal_tokens, text_embeddings], dim=1)
-            # else:
-            #     combined_embeddings = text_embeddings
-            combined_embeddings = torch.cat([projected_vision, projected_lidar, text_embeddings], dim=1)
 
+            # Force "Future" as the first token by prepending its embedding
+            forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+            forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
             
-            # Generate
+            # Get embedding for "Future" token
+            future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+            future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
+            
+            # Combine: [vision] + [lidar] + [text] + [Future token]
+            combined_embeddings = torch.cat([projected_vision, projected_lidar, text_embeddings, future_embedding], dim=1)
+            
+            # Create attention mask for combined embeddings
+            attention_mask = torch.ones(
+                (batch_size, combined_embeddings.shape[1]),
+                dtype=torch.long,
+                device=self.device
+            )
+            
+            # Generate (Future token is already in the input, so generation continues from there)
             outputs = self.language_model.generate(
                 inputs_embeds=combined_embeddings,
-                max_new_tokens=2048,  # Increased from 512 (set to None for model's max context length)
+                attention_mask=attention_mask,
+                max_new_tokens=2048,  # Reduced by 1 since we already have "Future"
                 pad_token_id=self.tokenizer.eos_token_id,
                 output_scores=True,
                 return_dict_in_generate=True
