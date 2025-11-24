@@ -131,21 +131,24 @@ def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to
 
 class EvalNuScenes:
     def __init__(self, version, dataroot, prompt_part1, prompt_part2, nsweeps=5):
-        self.nusc = NuScenes(version=version, dataroot=dataroot)
+        self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.nsweeps = nsweeps
         self.prompt_part1 = prompt_part1
         self.prompt_part2 = prompt_part2
-        # build sample list similar to dataset
+        
+        # Build sample list
         self.sample_tokens = []
         for scene in self.nusc.scene:
             nbr_samples = scene['nbr_samples']
-            if nbr_samples < 13:
+            if nbr_samples < 20:
                 continue
             first_sample_token = scene['first_sample_token']
             sample = self.nusc.get('sample', first_sample_token)
-            for _ in range(2):
+            # Skip first 2 to ensure we have some history available
+            for _ in range(9):
                 sample = self.nusc.get('sample', sample['next'])
-            for _ in range(nbr_samples - 12):
+            # Stop before the end to ensure we have future ground truth
+            for _ in range(nbr_samples - 19):
                 self.sample_tokens.append(sample['token'])
                 sample = self.nusc.get('sample', sample['next'])
 
@@ -156,56 +159,82 @@ class EvalNuScenes:
         sample_token = self.sample_tokens[idx]
         sample = self.nusc.get('sample', sample_token)
 
-        # ego positions (last 3)
-        ego_positions = []
+        # 1. Get Current Ego Pose (Reference Frame)
+        cam_token = sample['data']['CAM_FRONT']
+        cam_data = self.nusc.get('sample_data', cam_token)
+        ego_pose_curr = self.nusc.get('ego_pose', cam_data['ego_pose_token'])
+        
+        # Store translation and rotation for transforming back later
+        ego_trans = np.array(ego_pose_curr['translation'])
+        ego_rot = Quaternion(ego_pose_curr['rotation'])
+
+        # 2. Get History (Global Coords)
+        history_points_global = []
         current_sample = sample
-        for _ in range(3):
-            cam_data = self.nusc.get('sample_data', current_sample['data']['CAM_FRONT'])
-            ego_pose = self.nusc.get('ego_pose', cam_data['ego_pose_token'])
-            ego_positions.append([float(ego_pose['translation'][0]), float(ego_pose['translation'][1])])
+        for _ in range(10): # Using 3 frames of history as per your previous logic
+            c_data = self.nusc.get('sample_data', current_sample['data']['CAM_FRONT'])
+            e_pose = self.nusc.get('ego_pose', c_data['ego_pose_token'])
+            history_points_global.append(np.array(e_pose['translation']))
+            
             if current_sample['prev']:
                 current_sample = self.nusc.get('sample', current_sample['prev'])
             else:
-                while len(ego_positions) < 3:
-                    ego_positions.append(ego_positions[-1])
-        ego_positions.reverse()
+                history_points_global.append(history_points_global[-1])
+        history_points_global.reverse()
 
-        # image and camera calibration
-        camera_token = sample['data']['CAM_FRONT']
-        camera_data = self.nusc.get('sample_data', camera_token)
-        image_path = os.path.join(self.nusc.dataroot, camera_data['filename'])
-        image = Image.open(image_path).convert('RGB')
-        
-        # Get camera calibration for visualization
-        cam_calib = self.nusc.get('calibrated_sensor', camera_data['calibrated_sensor_token'])
-        ego_pose = self.nusc.get('ego_pose', camera_data['ego_pose_token'])
-        cam_to_ego = {
-            'translation': cam_calib['translation'],
-            'rotation': cam_calib['rotation'],
-            'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
-        }
-        ego_to_world = {
-            'translation': ego_pose['translation'],
-            'rotation': ego_pose['rotation']
-        }
-
-        # ground truth 10 waypoints
-        waypoints = []
+        # 3. Get Future Ground Truth (Global Coords)
+        future_points_global = []
         current_sample = sample
         for _ in range(10):
+            if current_sample['next'] == '':
+                break
             next_sample_token = current_sample['next']
             next_sample = self.nusc.get('sample', next_sample_token)
-            next_camera_data = self.nusc.get('sample_data', next_sample['data']['CAM_FRONT'])
-            next_ego_pose = self.nusc.get('ego_pose', next_camera_data['ego_pose_token'])['translation']
-            waypoints.append([float(next_ego_pose[0]), float(next_ego_pose[1])])
+            next_cam_data = self.nusc.get('sample_data', next_sample['data']['CAM_FRONT'])
+            next_ego_pose = self.nusc.get('ego_pose', next_cam_data['ego_pose_token'])
+            future_points_global.append(np.array(next_ego_pose['translation']))
             current_sample = next_sample
+            
+        # Pad if necessary
+        while len(future_points_global) < 10:
+             future_points_global.append(future_points_global[-1] if len(future_points_global) > 0 else ego_trans)
 
+        # 4. Transform to Local Coordinates (Egocentric)
+        history_local = []
+        for p in history_points_global:
+            diff = p - ego_trans
+            local_p = ego_rot.inverse.rotate(diff)
+            history_local.append(local_p[:2]) # Keep only x,y
+
+        future_local = []
+        for p in future_points_global:
+            diff = p - ego_trans
+            local_p = ego_rot.inverse.rotate(diff)
+            future_local.append(local_p[:2]) # Keep only x,y
+
+        # Image loading
+        image_path = os.path.join(self.nusc.dataroot, cam_data['filename'])
+        image = Image.open(image_path).convert('RGB')
+        
+        # Camera Calibration info
+        cam_calib = self.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
+        
         return {
             'image': image,
-            'ego_positions': ego_positions,
-            'waypoints': np.array(waypoints, dtype=float),
-            'cam_to_ego': cam_to_ego,
-            'ego_to_world': ego_to_world
+            'ego_positions_local': history_local, # Input to model
+            'waypoints_local': np.array(future_local, dtype=float), # GT for metrics
+            'waypoints_global': np.array(future_points_global, dtype=float), # Keep for Visualization
+            'ego_translation': ego_trans, # For Viz
+            'ego_rotation': ego_rot, # For Viz
+            'cam_to_ego': {
+                'translation': cam_calib['translation'],
+                'rotation': cam_calib['rotation'],
+                'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
+            },
+            'ego_to_world': {
+                'translation': ego_pose_curr['translation'],
+                'rotation': ego_pose_curr['rotation']
+            }
         }
 
 
@@ -338,8 +367,11 @@ def evaluate(args):
         # Collect batch data
         batch_items = [ds.get_item(idx) for idx in batch_indices]
         batch_images = [item['image'] for item in batch_items]
-        batch_ego_positions = [item['ego_positions'] for item in batch_items]
-        batch_gt_waypoints = [item['waypoints'] for item in batch_items]
+        batch_ego_positions_local = [item['ego_positions_local'] for item in batch_items]
+        batch_gt_waypoints_local = [item['waypoints_local'] for item in batch_items]
+        batch_gt_waypoints_global = [item['waypoints_global'] for item in batch_items] 
+        batch_ego_trans = [item['ego_translation'] for item in batch_items]
+        batch_ego_rot = [item['ego_rotation'] for item in batch_items]
         batch_cam_to_ego = [item['cam_to_ego'] for item in batch_items]
         batch_ego_to_world = [item['ego_to_world'] for item in batch_items]
         
@@ -347,7 +379,7 @@ def evaluate(args):
         pixel_values = model.image_processor(images=batch_images, return_tensors='pt').pixel_values.to(device)
         
         # Convert ego_positions to Python float lists
-        batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
+        batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions_local]
         
         # === Compute Cross-Entropy Loss (batched) ===
         batch_ce_losses = []
@@ -359,7 +391,7 @@ def evaluate(args):
                 # Prepare batch of texts
                 batch_prompts = []
                 batch_full_texts = []
-                for ego_pos, gt_wp in zip(batch_ego_positions, batch_gt_waypoints):
+                for ego_pos, gt_wp in zip(batch_ego_positions_local, batch_gt_waypoints_local):
                     pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_pos])
                     prompt = f"{model.prompt_part1}[{pos_str}]\n{model.prompt_part2}"
                     wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in gt_wp])
@@ -434,7 +466,7 @@ def evaluate(args):
         
         for i, idx in enumerate(batch_indices):
             gen_text = gen_texts[i]
-            pred_coords = parse_coords_from_text(gen_text, max_points=10)
+            pred_coords_local = parse_coords_from_text(gen_text, max_points=10)
             
             # Print generated text for first few samples
             if idx < 5 or idx in vis_indices:
@@ -452,8 +484,8 @@ def evaluate(args):
                 pred_coords = pred_coords[:10]
             
             # Coordinate metrics
-            gt_waypoints = batch_gt_waypoints[i]
-            diffs = pred_coords - gt_waypoints
+            gt_waypoints_local = batch_gt_waypoints_local[i]
+            diffs = pred_coords_local - gt_waypoints_local
             l2_per_waypoint = np.linalg.norm(diffs, axis=1)
             ade = np.nanmean(l2_per_waypoint)
             fde = l2_per_waypoint[-1]
@@ -477,10 +509,28 @@ def evaluate(args):
             
             # Visualize selected samples
             if idx in vis_indices:
+                ego_rot = batch_ego_rot[i]
+                ego_trans = batch_ego_trans[i]
+
+                pred_coords_global = []
+                for pt in pred_coords_local:
+                    if np.isnan(pt).any():
+                        pred_coords_global.append(pt)
+                        continue
+                    # 3D diff (x, y, 0)
+                    diff_3d = np.array([pt[0], pt[1], 0.0])
+                    # Rotate back to world
+                    global_3d = ego_rot.rotate(diff_3d) + ego_trans
+                    pred_coords_global.append(global_3d[:2])
+
+                pred_coords_global = np.array(pred_coords_global)
+
+
+                # Use Global GT and Global Preds for the image overlay
                 visualize_trajectories(
                     batch_items[i]['image'],
-                    gt_waypoints,
-                    pred_coords[:num_valid_waypoints] if num_valid_waypoints > 0 else np.array([]).reshape(0, 2),
+                    batch_gt_waypoints_global[i][:, :2], # Ensure 2D
+                    pred_coords_global,
                     batch_cam_to_ego[i],
                     batch_ego_to_world[i],
                     idx,
@@ -586,7 +636,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
-    parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')
+    parser.add_argument('--llm', type=str, default='Qwen/Qwen2.5-3B-Instruct', help='LLM to use for evaluation')
     parser.add_argument('--num_vis', type=int, default=10, help='Number of random samples to visualize (0 to disable)')
     parser.add_argument('--run_name', type=str, required=True, help='Name for this evaluation run (used to keep track of ablations)')
     
