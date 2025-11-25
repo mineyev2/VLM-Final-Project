@@ -153,13 +153,13 @@ class EvalNuScenes:
         self.sample_tokens = []
         for scene in self.nusc.scene:
             nbr_samples = scene['nbr_samples']
-            if nbr_samples < 13:
+            if nbr_samples < 20:
                 continue
             first_sample_token = scene['first_sample_token']
             sample = self.nusc.get('sample', first_sample_token)
-            for _ in range(2):
+            for _ in range(9):
                 sample = self.nusc.get('sample', sample['next'])
-            for _ in range(nbr_samples - 12):
+            for _ in range(nbr_samples - 19):
                 self.sample_tokens.append(sample['token'])
                 sample = self.nusc.get('sample', sample['next'])
 
