@@ -144,7 +144,7 @@ class EvalNuScenes:
                 continue
             first_sample_token = scene['first_sample_token']
             sample = self.nusc.get('sample', first_sample_token)
-            # Skip first 2 to ensure we have some history available
+            # Skip first 9 to ensure we have history available (matching Dataset logic)
             for _ in range(9):
                 sample = self.nusc.get('sample', sample['next'])
             # Stop before the end to ensure we have future ground truth
@@ -171,7 +171,7 @@ class EvalNuScenes:
         # 2. Get History (Global Coords)
         history_points_global = []
         current_sample = sample
-        for _ in range(10): # Using 3 frames of history as per your previous logic
+        for _ in range(10): 
             c_data = self.nusc.get('sample_data', current_sample['data']['CAM_FRONT'])
             e_pose = self.nusc.get('ego_pose', c_data['ego_pose_token'])
             history_points_global.append(np.array(e_pose['translation']))
@@ -243,19 +243,8 @@ def load_checkpoint_into_model(model, ckpt_path, device):
     For now, only 2 options:
     1) Model is just glue layer
     2) Model is full checkpoint with projector + vision tower + language model
-
-    So only checking for these two cases in here
     """
     data = torch.load(ckpt_path, map_location=device)
-
-    # try:
-    #     model.mlp_projector.load_state_dict(data)
-    #     print(colored(f"Loaded projector state_dict from {ckpt_path}", "green"))
-    # except Exception as e:
-    #     print(colored(f"Warning: failed to load projector state_dict: {e}", "red"))
-    # return
-
-
 
     if 'language_model_state_dict' in data:
         try:
@@ -274,51 +263,6 @@ def load_checkpoint_into_model(model, ckpt_path, device):
             print(colored(f"Warning: failed to load projector state_dict: {e}", "red"))
 
 
-    # If it's a raw state dict for projector (train saved that as checkpoint_latest.pth)
-    # if all(isinstance(k, str) for k in data.keys()) and any('weight' in k or 'bias' in k for k in data.keys()):
-    #     try:
-    #         model.mlp_projector.load_state_dict(data)
-    #         print(f"Loaded projector state_dict from {ckpt_path}")
-    #     except Exception as e:
-    #         print(f"Warning: failed to load projector state_dict: {e}")
-    #     return
-
-    # # If it's the 'final_model.pth' dict saved by train_v3
-    # if isinstance(data, dict) and ('model_state_dict' in data or 'vision_tower_state_dict' in data or 'language_model_state_dict' in data):
-    #     # projector
-    #     if 'model_state_dict' in data:
-    #         try:
-    #             model.mlp_projector.load_state_dict(data['model_state_dict'])
-    #             print("Loaded mlp_projector from final checkpoint.")
-    #         except Exception as e:
-    #             print(f"Warning loading mlp_projector: {e}")
-    #     # vision tower
-    #     if 'vision_tower_state_dict' in data:
-    #         try:
-    #             model.vision_tower.load_state_dict(data['vision_tower_state_dict'])
-    #             print("Loaded vision_tower weights.")
-    #         except Exception as e:
-    #             print(f"Warning loading vision_tower: {e}")
-    #     # language model
-    #     if 'language_model_state_dict' in data:
-    #         try:
-    #             # try non-strict to avoid mismatch
-    #             model.language_model.load_state_dict(data['language_model_state_dict'], strict=False)
-    #             print("Loaded (partial/soft) language_model weights.")
-    #         except Exception as e:
-    #             print(f"Warning loading language_model: {e}")
-    #     return
-
-    # print("Unrecognized checkpoint format, attempting to load as state_dict into projector...")
-    # try:
-    #     model.mlp_projector.load_state_dict(data)
-    #     print("Loaded projector state_dict (fallback).")
-    # except Exception as e:
-    #     print(f"Failed fallback loading: {e}")
-
-
-
-
 def evaluate(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -334,16 +278,10 @@ def evaluate(args):
         # Clear cache again before loading checkpoint weights
         if device == 'cuda':
             torch.cuda.empty_cache()
-            
-        # load_checkpoint_into_model(model, args.checkpoint, device)
 
     model.eval()
 
-    # Loss function for computing cross-entropy (same as training)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
-
     # dataset for evaluation
-    # TODO: Add LiDAR here
     ds = EvalNuScenes(args.version, args.dataroot, model.prompt_part1, model.prompt_part2)
 
     results = []
@@ -381,78 +319,6 @@ def evaluate(args):
         # Convert ego_positions to Python float lists
         batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions_local]
         
-        # === Compute Cross-Entropy Loss (batched) ===
-        batch_ce_losses = []
-        batch_token_accs = []
-        batch_perplexities = []
-        
-        try:
-            with torch.no_grad():
-                # Prepare batch of texts
-                batch_prompts = []
-                batch_full_texts = []
-                for ego_pos, gt_wp in zip(batch_ego_positions_local, batch_gt_waypoints_local):
-                    pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_pos])
-                    prompt = f"{model.prompt_part1}[{pos_str}]\n{model.prompt_part2}"
-                    wp_str = ", ".join([f"[{wp[0]:.2f}, {wp[1]:.2f}]" for wp in gt_wp])
-                    target_string = "Future Trajectory: " + wp_str
-                    full_text = prompt + target_string
-                    batch_prompts.append(prompt)
-                    batch_full_texts.append(full_text)
-                
-                # Tokenize batch with padding
-                batch_inputs = model.tokenizer(batch_full_texts, return_tensors="pt", padding=True).to(device)
-                batch_input_ids = batch_inputs.input_ids
-                
-                # Create labels for each sample
-                batch_labels = batch_input_ids.clone()
-                for i, prompt in enumerate(batch_prompts):
-                    prompt_tokens = model.tokenizer(prompt, return_tensors="pt").input_ids
-                    prompt_length = prompt_tokens.shape[1]
-                    batch_labels[i, :prompt_length] = -100
-                
-                # Forward pass
-                batch_logits = model(pixel_values, batch_input_ids)
-                
-                # Compute loss per sample
-                num_image_patches = batch_logits.shape[1] - batch_labels.shape[1]
-                logits_for_loss = batch_logits[:, num_image_patches:-1, :]
-                labels_for_loss = batch_labels[:, 1:]
-                
-                for i in range(len(batch_indices)):
-                    sample_logits = logits_for_loss[i:i+1]
-                    sample_labels = labels_for_loss[i:i+1]
-                    
-                    losses = loss_fn(
-                        sample_logits.reshape(-1, sample_logits.size(-1)),
-                        sample_labels.reshape(-1)
-                    )
-                    
-                    valid_losses = losses[sample_labels.reshape(-1) != -100]
-                    if len(valid_losses) > 0:
-                        ce_loss = valid_losses.mean().item()
-                        batch_ce_losses.append(ce_loss)
-                        batch_perplexities.append(np.exp(ce_loss))
-                        
-                        # Token accuracy
-                        preds = sample_logits.argmax(dim=-1)
-                        valid_mask = sample_labels != -100
-                        if valid_mask.sum() > 0:
-                            correct = (preds == sample_labels) & valid_mask
-                            token_acc = correct.sum().item() / valid_mask.sum().item()
-                            batch_token_accs.append(token_acc)
-                        else:
-                            batch_token_accs.append(np.nan)
-                    else:
-                        batch_ce_losses.append(np.nan)
-                        batch_perplexities.append(np.nan)
-                        batch_token_accs.append(np.nan)
-        except Exception as e:
-            print(f"Loss computation failed for batch {batch_idx}: {e}")
-            batch_ce_losses = [np.nan] * len(batch_indices)
-            batch_perplexities = [np.nan] * len(batch_indices)
-            batch_token_accs = [np.nan] * len(batch_indices)
-        
         # === Generate trajectories (batched) ===
         try:
             outputs, gen_texts = model.generate_trajectory(pixel_values, batch_ego_positions_py)
@@ -472,16 +338,16 @@ def evaluate(args):
             if idx < 5 or idx in vis_indices:
                 print(colored(f"\n[Sample {idx}] Generated text:", "cyan"))
                 print(gen_text)
-                print(colored(f"Parsed waypoints: {pred_coords.shape[0]}/10", "yellow"))
+                print(colored(f"Parsed waypoints: {pred_coords_local.shape[0]}/10", "yellow"))
             
-            num_valid_waypoints = pred_coords.shape[0]
+            num_valid_waypoints = pred_coords_local.shape[0]
             format_compliant = (num_valid_waypoints == 10)
             
-            if pred_coords.shape[0] < 10:
-                pad = np.full((10 - pred_coords.shape[0], 2), np.nan)
-                pred_coords = np.vstack([pred_coords, pad])
-            elif pred_coords.shape[0] > 10:
-                pred_coords = pred_coords[:10]
+            if pred_coords_local.shape[0] < 10:
+                pad = np.full((10 - pred_coords_local.shape[0], 2), np.nan)
+                pred_coords_local = np.vstack([pred_coords_local, pad])
+            elif pred_coords_local.shape[0] > 10:
+                pred_coords_local = pred_coords_local[:10]
             
             # Coordinate metrics
             gt_waypoints_local = batch_gt_waypoints_local[i]
@@ -494,9 +360,6 @@ def evaluate(args):
             
             results.append({
                 'idx': idx,
-                'cross_entropy_loss': float(batch_ce_losses[i]),
-                'perplexity': float(batch_perplexities[i]),
-                'token_accuracy': float(batch_token_accs[i]),
                 'num_valid_waypoints': int(num_valid_waypoints),
                 'format_compliant': int(format_compliant),
                 'ade': float(ade),
@@ -522,9 +385,8 @@ def evaluate(args):
                     # Rotate back to world
                     global_3d = ego_rot.rotate(diff_3d) + ego_trans
                     pred_coords_global.append(global_3d[:2])
-
+                
                 pred_coords_global = np.array(pred_coords_global)
-
 
                 # Use Global GT and Global Preds for the image overlay
                 visualize_trajectories(
@@ -538,9 +400,6 @@ def evaluate(args):
                 )
 
     # aggregate metrics
-    ce_losses = [r['cross_entropy_loss'] for r in results if not np.isnan(r['cross_entropy_loss'])]
-    perplexities = [r['perplexity'] for r in results if not np.isnan(r['perplexity'])]
-    token_accs = [r['token_accuracy'] for r in results if not np.isnan(r['token_accuracy'])]
     ades = [r['ade'] for r in results if not np.isnan(r['ade'])]
     fdes = [r['fde'] for r in results if not np.isnan(r['fde'])]
     miss_rates = [r['miss_rate_10m'] for r in results]
@@ -553,11 +412,6 @@ def evaluate(args):
 
     summary = {
         'num_samples': len(results),
-        # Loss metrics
-        'cross_entropy_loss_mean': float(np.mean(ce_losses)) if len(ce_losses) > 0 else float('nan'),
-        'cross_entropy_loss_std': float(np.std(ce_losses)) if len(ce_losses) > 0 else float('nan'),
-        'perplexity_mean': float(np.mean(perplexities)) if len(perplexities) > 0 else float('nan'),
-        'token_accuracy_mean': float(np.mean(token_accs)) if len(token_accs) > 0 else float('nan'),
         # Coordinate metrics
         'ade_mean': float(np.mean(ades)) if len(ades) > 0 else float('nan'),
         'ade_std': float(np.std(ades)) if len(ades) > 0 else float('nan'),
@@ -579,8 +433,7 @@ def evaluate(args):
     
     # Flatten waypoint_errors for CSV (convert list to individual columns)
     with open(csv_path, 'w', newline='') as f:
-        fieldnames = ['idx', 'cross_entropy_loss', 'perplexity', 'token_accuracy', 
-                     'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
+        fieldnames = ['idx', 'num_valid_waypoints', 'format_compliant', 'ade', 'fde', 'miss_rate_10m',
                      'processing_time_sec'] + \
                      [f'wp{i}_error' for i in range(10)] + ['gen_text']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -588,9 +441,6 @@ def evaluate(args):
         for r in results:
             row = {
                 'idx': r['idx'],
-                'cross_entropy_loss': r['cross_entropy_loss'],
-                'perplexity': r['perplexity'],
-                'token_accuracy': r['token_accuracy'],
                 'num_valid_waypoints': r['num_valid_waypoints'],
                 'format_compliant': r['format_compliant'],
                 'ade': r['ade'],
@@ -612,10 +462,6 @@ def evaluate(args):
 
     print(colored('\n=== Evaluation Summary ===', 'cyan', attrs=['bold']))
     print(colored(f"Samples evaluated: {summary['num_samples']}", 'white'))
-    print(colored('\nLoss Metrics:', 'yellow'))
-    print(f"  Cross-Entropy Loss: {summary['cross_entropy_loss_mean']:.4f} ± {summary['cross_entropy_loss_std']:.4f}")
-    print(f"  Perplexity: {summary['perplexity_mean']:.4f}")
-    print(f"  Token Accuracy: {summary['token_accuracy_mean']:.4f}")
     print(colored('\nTrajectory Metrics:', 'yellow'))
     print(f"  Average Displacement Error (mean): {summary['ade_mean']:.4f} ± {summary['ade_std']:.4f}")
     print(f"  Final Displacement Error (mean): {summary['fde_mean']:.4f} ± {summary['fde_std']:.4f}")
