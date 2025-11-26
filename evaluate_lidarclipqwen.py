@@ -9,7 +9,7 @@ import cv2
 from tqdm import tqdm
 from termcolor import colored
 
-from src.models.lidarclip_qwen_model import LidarCLIPQwenModel
+from src.models.lidar_emma import LidarEMMA
 from src.utils.utils import ProjectWorldToImage, OffsetTrajectory3D
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
@@ -308,7 +308,7 @@ def evaluate(args):
     if device == 'cuda':
         torch.cuda.empty_cache()
     
-    model = LidarCLIPQwenModel(device, qwen_model_name=args.llm, checkpoint_path=args.checkpoint)
+    model = LidarEMMA(device, qwen_model_name=args.llm, checkpoint_path=args.checkpoint)
     # Load checkpoint
     if args.checkpoint is not None:
         print(colored(f"Loading model weights from {args.checkpoint}...", "white"))

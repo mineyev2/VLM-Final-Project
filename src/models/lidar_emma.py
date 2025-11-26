@@ -9,7 +9,7 @@ from termcolor import colored
 from .sst import LidarEncoderSST
 
 
-class LidarCLIPQwenModel(nn.Module):
+class LidarEMMA(nn.Module):
     """
     Multimodal model combining:
     - Qwen LLM backbone
@@ -33,7 +33,7 @@ class LidarCLIPQwenModel(nn.Module):
 
         self.device = device
         print(f"\n{'='*70}")
-        print(f"Initializing LidarCLIPQwenModel on device: {self.device}")
+        print(f"Initializing LidarEMMA on device: {self.device}")
         print(f"{'='*70}\n")
 
         # ================================
@@ -397,11 +397,11 @@ class LidarCLIPQwenModel(nn.Module):
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    print("Testing LidarCLIPQwenModel initialization...")
+    print("Testing LidarEMMA initialization...")
     print(f"Device: {device}\n")
     
     try:
-        model = LidarCLIPQwenModel(
+        model = LidarEMMA(
             device=device,
             qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
             clip_model_name="openai/clip-vit-large-patch14",
