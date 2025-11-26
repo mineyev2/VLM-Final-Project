@@ -11,7 +11,7 @@ class BaseModel(nn.Module, ABC):
         # Prompts stored here for consistency across train/eval
         self.prompt_part1 = (
             "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
-            "Your last recorded positions (x, y) in the local ego-frame are: "
+            "Your last recorded positions (x, y) in the global ego-frame are: "
         )
         self.prompt_part2 = (
             "It is critical that you output exactly 10 waypoints. "
@@ -19,6 +19,11 @@ class BaseModel(nn.Module, ABC):
             "For example:\n"
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]\n\n"
         )
+
+    @abstractmethod
+    def forward(self, images, lidar, ego_pos_global):
+        """Standard PyTorch forward pass."""
+        pass
 
     @abstractmethod
     def _load_checkpoint_weights(self, checkpoint=None):

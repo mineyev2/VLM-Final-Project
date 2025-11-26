@@ -6,10 +6,10 @@ from src.models.base_model import BaseModel
 
 class QwenCLIPModel(BaseModel):
 
-    def __init__(self, device, qwen_model_name="Qwen/Qwen2.5-3B-Instruct", clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
+    def __init__(self, device, llm=None, clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
         super().__init__()
 
-        if "Qwen2.5" not in qwen_model_name:
+        if llm is None or "Qwen2.5" not in llm:
             raise Exception("Use Qwen2.5 for QwenCLIP")
 
         self.device = device
@@ -26,17 +26,17 @@ class QwenCLIPModel(BaseModel):
         self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
         self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
 
-        print(f"Loading Qwen language model: {qwen_model_name}...")
-        self.qwen_model_name = qwen_model_name
+        print(f"Loading Qwen language model: {llm}...")
+        self.qwen_model_name = llm
         
         # Use the text-only model (AutoModelForCausalLM is correct for Qwen2.5-3B-Instruct)
         self.language_model = AutoModelForCausalLM.from_pretrained(
-            qwen_model_name,
+            llm,
             torch_dtype=torch.bfloat16,
             device_map="auto"
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(llm)
         # Ensure pad token is set
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

@@ -11,10 +11,13 @@ import numpy as np
 from scipy import interpolate
 from datetime import datetime
 import wandb
+import yaml
+from dataclasses import fields
 
 # Assuming these files are in the same directory or python path
 from src.models.qwen_clip_model import QwenCLIPModel
 from scripts.nuscenes_dataset import NuScenesDataset
+from training_configs.dataclass import TrainingArgs
 
 def custom_collate_fn(batch):
     """
@@ -34,27 +37,71 @@ def custom_collate_fn(batch):
         'labels': labels
     }
 
+def load_yaml_config(path):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
 def main():
+    # ========== Argument Parsing ==========
     parser = argparse.ArgumentParser(description="Train the QwenCLIPModel on the NuScenes dataset.")
-    parser.add_argument("--version", type=str, default='v1.0-trainval', help="Version of the NuScenes dataset.")
-    parser.add_argument("--dataroot", type=str, default="/storage/ice-shared/cs8803vlm/rmineyev3/", help="Root directory of the dataset.")
+    
+    # Required Args
+    # TODO: Make this use ablation number (1a, 2a, etc.)
+    # TODO: Make arg to switch between lidar and non-lidar, and make it required
+    parser.add_argument(
+        "--ablation",
+        type=str,
+        required=True,
+        choices=["1a", "2a", "3a", "1b", "2b", "3b"],
+        help="Select ablation config: 1a, 2a, 3a, 1b, 2b, 3b (for no lidar), or 1a-lidar, 2a-lidar, 3a-lidar, 1b-lidar, 2b-lidar, 3b-lidar (with lidar)."
+    )
+
+    parser.add_argument("--run_name", type=str, required=True, help="Custom run name (optional).")
+    parser.add_argument("--wandb_project", type=str, required=True, help="WandB project name.") # Pranav's: "vlm-training"
+
+    # Optional args
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training.")
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers.")
-    parser.add_argument("--penalty_weight", type=float, default=5.0, help="Weight for the missing waypoint penalty.")
-    parser.add_argument("--output_dir", type=str, default="./outputs/latest", help="Directory to save model and plots.")
-    parser.set_defaults(freeze_vision_tower=True, freeze_lang_model=True)
-    parser.add_argument("--unfreeze-vision-tower", dest="freeze_vision_tower", action="store_false",
-                        help="Unfreeze the vision tower for fine-tuning.")
-    parser.add_argument("--unfreeze-lang-model", dest="freeze_lang_model", action="store_false",
-                        help="Unfreeze the language model for fine-tuning.")
-    parser.add_argument("--wandb_project", type=str, default="vlm-training", help="WandB project name.")
-    parser.add_argument("--run_name", type=str, default=None, help="Custom run name (optional).")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs.")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint file to resume training.")
-    args = parser.parse_args()
 
+    # Unchanged args (I commented out for now - Roman)
+    # parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    # parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers.")
+    # parser.add_argument("--penalty_weight", type=float, default=5.0, help="Weight for the missing waypoint penalty.")
+    # parser.set_defaults(freeze_vision_tower=True, freeze_lang_model=True)
+    # parser.add_argument("--version", type=str, default='v1.0-trainval', help="Version of the NuScenes dataset.")
+    # parser.add_argument("--dataroot", type=str, default="/storage/ice-shared/cs8803vlm/rmineyev3/", help="Root directory of the dataset.")
+    # parser.add_argument("--output_dir", type=str, default="./outputs/latest", help="Directory to save model and plots.")
+
+    terminal_args = parser.parse_args()
+
+    # 1) Load dataclasses with default values
+    args = TrainingArgs()
+
+    # 2) Override config class with YAML config
+    yaml_path = f"training_configs/{terminal_args.ablation}.yaml"
+    with open(yaml_path, "r") as f:
+        yaml_config = yaml.safe_load(f)
+
+    for key, value in yaml_config.items():
+        if hasattr(args, key) and value is not None:
+            # Get the expected type from the dataclass
+            field_type = next(f.type for f in fields(args) if f.name == key)
+            setattr(args, key, field_type(value))
+
+    # 3) Override updated YAML config with command-line args
+    for key, value in vars(terminal_args).items():
+        if value is not None:
+            setattr(args, key, value)
+
+    # # 4) Print arguments
+    # print(colored("--- Final Training Configuration ---", "cyan"))
+    # for k, v in vars(args).items():
+    #     print(f"{k}: {v}")
+    # print(colored("--------------------------", "cyan"))
+
+    # =========== Setup ==========
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -70,7 +117,7 @@ def main():
         prompt_part2=model.prompt_part2
     )
 
-    pad_id = model.tokenizer.pad_token_id
+    # pad_id = model.tokenizer.pad_token_id
     
     dataloader = DataLoader(
         dataset, 
@@ -144,7 +191,8 @@ def main():
     for k, v in vars(args).items():
         print(f"{k}: {v}")
     print(colored("--------------------------", "cyan"))
-
+    
+    # =========== Training Loop ==========
     for epoch in range(start_epoch, args.epochs):
         model.mlp_projector.train()
         if not args.freeze_vision_tower:

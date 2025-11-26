@@ -1,0 +1,20 @@
+# Important args
+llm: "Qwen/Qwen2.5-3B"
+freeze_vision_tower: false
+freeze_lang_model: false
+epochs: 100
+batch_size: 8
+run_name: "experiment_1"
+save_every: 10
+wandb_project: "vlm-training"
+resume_from_checkpoint: null
+
+# Optimization / less important args
+lr: 1e-5
+num_workers: 4
+penalty_weight: 5.0
+
+# Dataset / path args
+version: "v1.0-trainval"
+dataroot: "/storage/ice-shared/cs8803vlm/rmineyev3/"
+output_dir: "./outputs/latest"
