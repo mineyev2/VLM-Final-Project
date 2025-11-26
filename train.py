@@ -1,11 +1,20 @@
-import argparse
+# PyTorch Files
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+# Local files
+from src.models.qwen_clip_model import QwenCLIPModel
+from src.models.lidar_emma import LidarEMMA
+from scripts.nuscenes_dataset import NuScenesDataset
+from training_configs.dataclass import TrainingArgs
+
+# Other
+import argparse
 import gc
 import os
-from torch.utils.data import DataLoader
 from termcolor import colored
 from tqdm import tqdm
-import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -13,11 +22,6 @@ from datetime import datetime
 import wandb
 import yaml
 from dataclasses import fields
-
-# Assuming these files are in the same directory or python path
-from src.models.qwen_clip_model import QwenCLIPModel
-from scripts.nuscenes_dataset import NuScenesDataset
-from training_configs.dataclass import TrainingArgs
 
 def custom_collate_fn(batch):
     """
@@ -52,8 +56,9 @@ def main():
         "--ablation",
         type=str,
         required=True,
-        choices=["1a", "2a", "3a", "1b", "2b", "3b"],
-        help="Select ablation config: 1a, 2a, 3a, 1b, 2b, 3b (for no lidar), or 1a-lidar, 2a-lidar, 3a-lidar, 1b-lidar, 2b-lidar, 3b-lidar (with lidar)."
+        choices=["1a", "2a", "3a", "1b", "2b", "3b",
+                 "1a-lidar","2a-lidar", "3a-lidar", "1b-lidar", "2b-lidar", "3b-lidar"],
+        help="Select ablation config: 1a, 2a, 3a, 1b, 2b, 3b (no lidar), or 1a-lidar, 2a-lidar, 3a-lidar, 1b-lidar, 2b-lidar, 3b-lidar (with lidar)."
     )
 
     parser.add_argument("--run_name", type=str, required=True, help="Custom run name (optional).")
@@ -69,7 +74,7 @@ def main():
     # parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     # parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers.")
     # parser.add_argument("--penalty_weight", type=float, default=5.0, help="Weight for the missing waypoint penalty.")
-    # parser.set_defaults(freeze_vision_tower=True, freeze_lang_model=True)
+    # parser.set_defaults(freeze_encoder=True, freeze_lang_model=True)
     # parser.add_argument("--version", type=str, default='v1.0-trainval', help="Version of the NuScenes dataset.")
     # parser.add_argument("--dataroot", type=str, default="/storage/ice-shared/cs8803vlm/rmineyev3/", help="Root directory of the dataset.")
     # parser.add_argument("--output_dir", type=str, default="./outputs/latest", help="Directory to save model and plots.")
@@ -107,7 +112,10 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
 
-    model = QwenCLIPModel(device, llm=args.llm)
+    if "lidar" in args.ablation:
+        model = LidarEMMA(device, llm=args.llm)
+    else:
+        model = QwenCLIPModel(device, llm=args.llm)
     
     dataset = NuScenesDataset(
         version=args.version,
@@ -127,6 +135,7 @@ def main():
         collate_fn=custom_collate_fn
     )
 
+    # TODO: Make this variable as well
     optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
 
     start_epoch = 0
@@ -146,9 +155,9 @@ def main():
         start_epoch = checkpoint['epoch']
         loss_history = checkpoint['loss_history']
         wandb_run_id = checkpoint['wandb_run_id']
-        args.run_name = checkpoint['run_name'] 
+        args.run_name = checkpoint['run_name']
 
-        args.freeze_vision_tower = checkpoint['args'].freeze_vision_tower
+        args.freeze_encoder = checkpoint['args'].freeze_encoder
         args.freeze_lang_model = checkpoint['args'].freeze_lang_model
         
         print(colored(f"--- Resumed from Epoch {start_epoch}. WandB Run ID: {wandb_run_id} ---", "yellow"))
@@ -157,8 +166,8 @@ def main():
             date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
             args.run_name = f"{date_str}-epochs{args.epochs}"
 
-    if args.freeze_vision_tower:
-        model.vision_tower.requires_grad_(False)
+    if args.freeze_encoder:
+        model.freeze_encoder()
     else:
         optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
     if args.freeze_lang_model:
@@ -195,7 +204,7 @@ def main():
     # =========== Training Loop ==========
     for epoch in range(start_epoch, args.epochs):
         model.mlp_projector.train()
-        if not args.freeze_vision_tower:
+        if not args.freeze_encoder:
             model.vision_tower.train()
         if not args.freeze_lang_model:
             model.language_model.train()

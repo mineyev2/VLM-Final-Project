@@ -10,13 +10,13 @@ class BaseModel(nn.Module, ABC):
 
         # Prompts stored here for consistency across train/eval
         self.prompt_part1 = (
-            "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
+            "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. " # TODO: Don't say camera image since we have lidar too
             "Your last recorded positions (x, y) in the global ego-frame are: "
         )
         self.prompt_part2 = (
             "It is critical that you output exactly 10 waypoints. "
             "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
-            "For example:\n"
+            "For example:\n" # TODO: Fix prompt. instead of for example, say the output MUST be, etc...
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]\n\n"
         )
 
@@ -32,4 +32,12 @@ class BaseModel(nn.Module, ABC):
     @abstractmethod
     def generateMotion(self, images, lidar, ego_pos_global):
         pass
-    
+
+    @abstractmethod
+    def freeze_encoder(self):
+        """
+        For QwenCLIP: Freeze the vision tower (CLIP) parameters.
+        For LidarEMMA: Freeze both the vision and lidar encoders.
+        """
+
+        pass

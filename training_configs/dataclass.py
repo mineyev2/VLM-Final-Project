@@ -3,7 +3,7 @@ from dataclasses import dataclass
 @dataclass
 class TrainingArgs:
     llm: str = None
-    freeze_vision_tower: bool = True
+    freeze_encoder: bool = True
     freeze_lang_model: bool = True
     epochs: int = None
     batch_size: int = None

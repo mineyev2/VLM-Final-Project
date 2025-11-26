@@ -5,11 +5,13 @@ import sys
 import os
 from termcolor import colored
 
+from src.models.base_model import BaseModel
+
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
 from .sst import LidarEncoderSST
 
 
-class LidarEMMA(nn.Module):
+class LidarEMMA(BaseModel):
     """
     Multimodal model combining:
     - Qwen LLM backbone
@@ -22,7 +24,7 @@ class LidarEMMA(nn.Module):
     def __init__(
         self,
         device,
-        qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
+        llm=None,
         clip_model_name="openai/clip-vit-large-patch14",
         lidarclip_config_path="./lidarclip/model/mmdet3d/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,
@@ -85,11 +87,11 @@ class LidarEMMA(nn.Module):
         print("\n[3/4] Loading Qwen language model...")
         try:
             self.language_model = AutoModelForCausalLM.from_pretrained(
-                qwen_model_name,
+                llm,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
             )
-            self.tokenizer = AutoTokenizer.from_pretrained(qwen_model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(llm)
             qwen_hidden_size = self.language_model.config.hidden_size
             print(f"      ✓ Qwen loaded. Hidden size: {qwen_hidden_size}")
         except Exception as e:
@@ -273,7 +275,7 @@ class LidarEMMA(nn.Module):
             final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
             prompts.append(final_prompt)
 
-        if self.qwen_model_name == "Qwen/Qwen3-4B": # TODO: Change model name
+        if self.llm == "Qwen/Qwen3-4B": # TODO: Change model name
             print(colored("Using Qwen3-4B prompt template...", "cyan"))
             full_prompts = [self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True, enable_thinking=False
@@ -358,6 +360,15 @@ class LidarEMMA(nn.Module):
 
     # =========================================================================
 
+    def freeze_encoder(self):
+        """
+        Freeze both the vision and LiDAR encoders.
+        """
+        
+        raise NotImplementedError("freeze_encoder method not implemented yet.")
+
+    # =========================================================================
+
     def get_trainable_parameters(self):
         """Return list of parameters to optimize."""
         params = []
@@ -403,7 +414,7 @@ if __name__ == "__main__":
     try:
         model = LidarEMMA(
             device=device,
-            qwen_model_name="Qwen/Qwen2.5-3B-Instruct",
+            llm="Qwen/Qwen2.5-3B-Instruct",
             clip_model_name="openai/clip-vit-large-patch14",
             lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
             lidarclip_checkpoint_path=None,

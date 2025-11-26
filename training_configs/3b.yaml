@@ -1,7 +1,7 @@
 # Important args
-llm: "Qwen/Qwen2.5-3B"
+llm: "Qwen/Qwen2.5-3B-Instruct"
 freeze_encoder: false
-freeze_lang_model: true
+freeze_lang_model: false
 epochs: 100
 batch_size: 8
 run_name: "experiment_1"

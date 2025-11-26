@@ -27,7 +27,7 @@ class QwenCLIPModel(BaseModel):
         self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
 
         print(f"Loading Qwen language model: {llm}...")
-        self.qwen_model_name = llm
+        self.llm = llm
         
         # Use the text-only model (AutoModelForCausalLM is correct for Qwen2.5-3B-Instruct)
         self.language_model = AutoModelForCausalLM.from_pretrained(
@@ -55,6 +55,12 @@ class QwenCLIPModel(BaseModel):
         if checkpoint_data is not None:
             print("Loading checkpoint weights into model components...")
             self._load_checkpoint_weights(checkpoint_data)
+
+    def freeze_encoder(self):
+        """
+        Freeze the vision tower (CLIP) parameters.
+        """
+        self.vision_tower.requires_grad_(False)
 
     def forward(self, images, input_ids, labels=None):
         """

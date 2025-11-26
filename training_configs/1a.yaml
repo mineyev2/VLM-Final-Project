@@ -1,6 +1,6 @@
 # Important args
 llm: "Qwen/Qwen2.5-3B"
-freeze_vision_tower: true
+freeze_encoder: true
 freeze_lang_model: true
 epochs: 100
 batch_size: 8

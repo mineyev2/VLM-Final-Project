@@ -1,5 +1,5 @@
 # Important args
-llm: "Qwen/Qwen2.5-3B"
+llm: "Qwen/Qwen2.5-3B-Instruct"
 freeze_encoder: false
 freeze_lang_model: true
 epochs: 100
