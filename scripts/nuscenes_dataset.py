@@ -26,15 +26,17 @@ class NuScenesDataset(Dataset):
 
         # Create list of samples
         self.samples = []
+        num_hist_points = 10 # including current
+        num_future_points = 10
         for scene in self.nusc.scene:
             nbr_samples = scene['nbr_samples']
-            if nbr_samples < 20: 
+            if nbr_samples < num_hist_points + num_future_points: 
                 continue
             
             sample = self.nusc.get('sample', scene['first_sample_token'])
             
             # Skip first 9 samples to ensure 10 frames of history
-            for _ in range(9): 
+            for _ in range(num_hist_points - 1):
                 sample = self.nusc.get('sample', sample['next'])
                 
             # Add samples (stop 10 frames before end for future ground truth)
@@ -154,5 +156,6 @@ class NuScenesDataset(Dataset):
             'waypoints': future_local,
             'ego_translation': ego_trans,
             'ego_rotation': ego_rot.elements
+
         }
     

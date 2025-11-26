@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Single Sample Evaluation Script for Multimodal LiDAR+CLIP+Qwen Model
-Evaluates one specific sample by index and displays detailed results with visualization.
+Single Sample Evaluation Script with Text Input
+Evaluates one specific sample by feeding a prediction text string directly.
+No model loading required - useful for testing and visualization.
 """
 
 import os
@@ -16,7 +17,6 @@ import torch
 import cv2
 from termcolor import colored
 
-from src.models.multimodal_qwen_model import MultimodalQwenModel
 from src.utils.utils import ProjectWorldToImage, OffsetTrajectory3D
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
@@ -352,11 +352,9 @@ def visualize_trajectory_bev(nusc, sample_token, gt_waypoints_local, pred_waypoi
 
 
 class EvalNuScenes:
-    def __init__(self, version, dataroot, prompt_part1, prompt_part2, nsweeps=5):
+    def __init__(self, version, dataroot, nsweeps=5):
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.nsweeps = nsweeps
-        self.prompt_part1 = prompt_part1
-        self.prompt_part2 = prompt_part2
         self.sample_tokens = []
         for scene in self.nusc.scene:
             nbr_samples = scene['nbr_samples']
@@ -451,23 +449,12 @@ class EvalNuScenes:
             'rotation': ego_pose['rotation']
         }
 
-        nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
-            self.nusc,
-            sample,
-            chan='LIDAR_TOP',
-            ref_chan='LIDAR_TOP',
-            nsweeps=self.nsweeps,
-            min_distance=1.0
-        )
-        torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points.T).float()
-
         return {
             'image': image,
             'ego_positions': history_local,
             'waypoints': future_local,
             'cam_to_ego': cam_to_ego,
             'ego_to_world': ego_to_world,
-            'lidar': torch_pointcloud,
             'ego_translation': ego_trans,
             'ego_rotation': ego_rot.elements,
             'sample_token': sample_token,
@@ -475,69 +462,17 @@ class EvalNuScenes:
         }
 
 
-def load_checkpoint_into_model(model, ckpt_path, device):
-    print(colored(f"Loading checkpoint from {ckpt_path}...", "yellow"))
-    data = torch.load(ckpt_path, map_location=device)
-    
-    if 'vision_projector_state_dict' in data:
-        try:
-            model.vision_projector.load_state_dict(data['vision_projector_state_dict'])
-            print(colored("  ✓ Loaded vision_projector weights", "green"))
-        except Exception as e:
-            print(colored(f"  ✗ Warning loading vision_projector: {e}", "red"))
-    
-    if 'lidar_projector_state_dict' in data:
-        try:
-            model.lidar_projector.load_state_dict(data['lidar_projector_state_dict'])
-            print(colored("  ✓ Loaded lidar_projector weights", "green"))
-        except Exception as e:
-            print(colored(f"  ✗ Warning loading lidar_projector: {e}", "red"))
-    
-    if 'lidar_encoder_state_dict' in data:
-        try:
-            model.lidar_encoder.load_state_dict(data['lidar_encoder_state_dict'])
-            print(colored("  ✓ Loaded lidar_encoder weights", "green"))
-        except Exception as e:
-            print(colored(f"  ✗ Warning loading lidar_encoder: {e}", "red"))
-
-
 def evaluate_single_sample(args):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    if device == 'cuda':
-        torch.cuda.empty_cache()
-    
     print(colored("\n" + "="*70, "cyan"))
-    print(colored("Single Sample Evaluation", "cyan", attrs=['bold']))
+    print(colored("Single Sample Evaluation - Text Input Mode", "cyan", attrs=['bold']))
     if args.sample_idx is not None:
         print(colored(f"Sample Index: {args.sample_idx}", "cyan", attrs=['bold']))
     else:
         print(colored(f"Sample Token: {args.sample_token}", "cyan", attrs=['bold']))
-    if args.disable_lidar:
-        print(colored("MODE: LiDAR Disabled (Vision + Text Only)", "magenta", attrs=['bold']))
     print(colored("="*70 + "\n", "cyan"))
     
-    # Load model
-    model = MultimodalQwenModel(
-        device=device,
-        qwen_model_name=args.llm,
-        clip_model_name=args.clip_model,
-        sst_config_path=args.sst_config,
-        lidarclip_checkpoint_path=args.lidar_encoder_path,
-        freeze_encoders=True,
-        freeze_llm=True,
-        mlp_hidden_dim=args.mlp_hidden_dim,
-        mlp_num_layers=args.mlp_num_layers,
-        mlp_dropout=args.mlp_dropout
-    )
-    
-    if args.checkpoint is not None:
-        load_checkpoint_into_model(model, args.checkpoint, device)
-    
-    model.eval()
-
     # Load dataset
-    ds = EvalNuScenes(args.version, args.dataroot, model.prompt_part1, model.prompt_part2, nsweeps=args.nsweeps)
-    
+    ds = EvalNuScenes(args.version, args.dataroot, nsweeps=5)
 
     while True:
         # Get sample - either by index or by token
@@ -561,27 +496,16 @@ def evaluate_single_sample(args):
         gt_waypoints = item['waypoints']
         cam_to_ego = item['cam_to_ego']
         ego_to_world = item['ego_to_world']
-        lidar = item['lidar']
         sample_token = item['sample_token']
         ego_translation = item['ego_translation']
         ego_rotation = Quaternion(item['ego_rotation'])
-        
-        # Prepare inputs
-        lidar_device = [lidar.to(device)] if not args.disable_lidar else None
-        ego_positions_py = [[float(x), float(y)] for (x, y) in ego_positions]
         
         print(colored("Input History (10 positions):", "cyan"))
         for h_idx, pos in enumerate(ego_positions):
             print(f"  Frame {h_idx}: [{pos[0]:.2f}, {pos[1]:.2f}]")
         
-        # Generate prediction
-        print(colored("\nGenerating prediction...", "yellow"))
-        try:
-            outputs, gen_texts = model.generate_trajectory([image], lidar_device, [ego_positions_py])
-            gen_text = gen_texts[0]
-        except Exception as e:
-            print(colored(f"Generation failed: {e}", "red"))
-            sys.exit(1)
+        # Use provided prediction text
+        gen_text = args.prediction_text
         
         # Parse prediction
         pred_coords = parse_coords_from_text(gen_text, max_points=10)
@@ -611,7 +535,7 @@ def evaluate_single_sample(args):
         print(colored("RESULTS", "magenta", attrs=['bold']))
         print(colored("="*70, "magenta"))
         
-        print(colored("\nGenerated Text:", "cyan"))
+        print(colored("\nInput Prediction Text:", "cyan"))
         print(gen_text)
         
         print(colored("\nMetrics:", "cyan"))
@@ -634,7 +558,7 @@ def evaluate_single_sample(args):
             print(f"  Waypoint {k}: GT [{gt_wp[k][0]:7.2f}, {gt_wp[k][1]:7.2f}]  ->  Pred: {p_str} {err_str}")
         
         # Create output directory (clear existing contents)
-        output_dir = 'eval_outputs/lidar_single_sample'
+        output_dir = 'eval_outputs/text_input_sample'
         if os.path.exists(output_dir):
             import shutil
             shutil.rmtree(output_dir)
@@ -702,45 +626,39 @@ def evaluate_single_sample(args):
         print(colored("Evaluation Complete!", "green", attrs=['bold']))
         print(colored("="*70 + "\n", "magenta"))
 
-        # read new index as input
-        new_idx = input("Enter another sample index to evaluate (or 'exit' to quit): ")
-        if new_idx.lower() == 'exit':
+        # Ask for new input
+        new_input = input("\nEnter another sample index and prediction text (or 'exit' to quit): ")
+        if new_input.lower() == 'exit':
             break
+        
         try:
-            args.sample_idx = int(new_idx)
+            parts = new_input.split(' ', 1)
+            if len(parts) != 2:
+                print(colored("Invalid input. Format: <sample_idx> <prediction_text>", "red"))
+                break
+            args.sample_idx = int(parts[0])
             args.sample_token = None
+            args.prediction_text = parts[1]
         except ValueError:
-            print(colored("Invalid input. Please enter a valid integer index or 'exit'.", "red"))
+            print(colored("Invalid input. Please enter a valid integer index followed by prediction text.", "red"))
             break
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Evaluate Single Sample - Multimodal LiDAR+CLIP+Qwen Model')
+    parser = argparse.ArgumentParser(description='Evaluate Single Sample with Text Input')
 
     # Important arguments
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
+    parser.add_argument('--prediction_text', type=str, required=True, 
+                       help='Prediction text string containing waypoint coordinates')
     
     # Mutually exclusive: either sample_idx or sample_token
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('--sample_idx', type=int, help='Sample index to evaluate')
     input_group.add_argument('--sample_token', type=str, help='Sample token to evaluate')
     
-    parser.add_argument('--llm', type=str, default='Qwen/Qwen2.5-3B-Instruct')
-
-    # Model arguments
-    parser.add_argument('--clip_model', type=str, default='openai/clip-vit-large-patch14')
-    parser.add_argument('--sst_config', type=str, default='src/models/mmdet3d/configs/sst_encoder_only_config.py')
-    parser.add_argument('--lidar_encoder_path', type=str, default='/home/hice1/rmineyev3/scratch/VLM-Final-Project/Lidar-CLIP/vit_l_14.ckpt')
-    parser.add_argument('--mlp_hidden_dim', type=int, default=2048)
-    parser.add_argument('--mlp_num_layers', type=int, default=3)
-    parser.add_argument('--mlp_dropout', type=float, default=0.1)
-    
     # Dataset arguments
     parser.add_argument('--dataroot', type=str, default='/storage/ice-shared/cs8803vlm/rmineyev3')
     parser.add_argument('--version', type=str, default='v1.0-test')
-    parser.add_argument('--nsweeps', type=int, default=5)
-    
-    # Options
-    parser.add_argument('--disable_lidar', action='store_true', help='Disable LiDAR input (Vision + Text only)')
     
     return parser.parse_args()
 
