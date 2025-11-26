@@ -62,9 +62,20 @@ class QwenCLIPModel(nn.Module):
         self.prompt_part2 = (
             "It is critical that you output exactly 10 waypoints. "
             "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
-            "For example:\n"
+            "Please follow this format EXACTLY:\n"
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
         )
+
+        # self.prompt_part1 = (
+        #     "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
+        #     "Your last recorded positions (x, y) in the local ego-frame are: "
+        # )
+        # self.prompt_part2 = (
+        #     "It is critical that you output exactly 10 waypoints. "
+        #     "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
+        #     "For example:\n"
+        #     "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
+        # )
 
     def forward(self, images, input_ids, labels=None):
         """
@@ -128,24 +139,38 @@ class QwenCLIPModel(nn.Module):
         # 4. Tokenize
         inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
         text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
+
+        # Force "Future" as the first token by prepending its embedding
+        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+        forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
+        
+        # Get embedding for "Future" token
+        batch_size = len(ego_positions)
+        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+        future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
         
         # 5. Concatenate [Image, Text]
-        combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
+        combined_embeddings = torch.cat([projected_image_features, text_embeddings, future_embedding], dim=1)
 
-        # 6. Attention Mask
-        image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
-        combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+        # # 6. Attention Mask
+        # image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
+        # combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+
+        # Create attention mask for combined embeddings
+        attention_mask = torch.ones(
+            (batch_size, combined_embeddings.shape[1]),
+            dtype=torch.long,
+            device=self.device
+        )
 
         # 7. Generate
         outputs = self.language_model.generate(
             inputs_embeds=combined_embeddings,
-            attention_mask=combined_attention_mask,
-            max_new_tokens=512,
-            min_new_tokens=50,
+            attention_mask=attention_mask,
+            max_new_tokens=2048,
             pad_token_id=self.tokenizer.eos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            # eos_token_id=self.tokenizer.eos_token_id,
             do_sample=False,
-            num_beams=1, 
             output_scores=True,
             return_dict_in_generate=True
         )
