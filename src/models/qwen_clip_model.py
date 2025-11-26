@@ -1,14 +1,16 @@
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, CLIPImageProcessor, AutoModelForCausalLM, AutoTokenizer
-import re
 from termcolor import colored
-import psutil
+from src.models.base_model import BaseModel
 
-class QwenCLIPModel(nn.Module):
+class QwenCLIPModel(BaseModel):
 
     def __init__(self, device, qwen_model_name="Qwen/Qwen2.5-3B-Instruct", clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
         super().__init__()
+
+        if "Qwen2.5" not in qwen_model_name:
+            raise Exception("Use Qwen2.5 for QwenCLIP")
 
         self.device = device
         print(f"Using device {self.device} for QwenCLIPModel.")
@@ -30,7 +32,7 @@ class QwenCLIPModel(nn.Module):
         # Use the text-only model (AutoModelForCausalLM is correct for Qwen2.5-3B-Instruct)
         self.language_model = AutoModelForCausalLM.from_pretrained(
             qwen_model_name,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             device_map="auto"
         )
 
@@ -53,29 +55,6 @@ class QwenCLIPModel(nn.Module):
         if checkpoint_data is not None:
             print("Loading checkpoint weights into model components...")
             self._load_checkpoint_weights(checkpoint_data)
-
-        # Prompts stored here for consistency across train/eval
-        self.prompt_part1 = (
-            "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
-            "Your last recorded positions (x, y) in the local ego-frame are: "
-        )
-        self.prompt_part2 = (
-            "It is critical that you output exactly 10 waypoints. "
-            "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
-            "Please follow this format EXACTLY:\n"
-            "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
-        )
-
-        # self.prompt_part1 = (
-        #     "You are a self-driving car. Your task is to predict the future trajectory based on the camera image and your recent movement. "
-        #     "Your last recorded positions (x, y) in the local ego-frame are: "
-        # )
-        # self.prompt_part2 = (
-        #     "It is critical that you output exactly 10 waypoints. "
-        #     "The trajectory must be formatted as a sequence of 10 2D coordinates `[x, y]`."
-        #     "For example:\n"
-        #     "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
-        # )
 
     def forward(self, images, input_ids, labels=None):
         """
@@ -139,38 +118,24 @@ class QwenCLIPModel(nn.Module):
         # 4. Tokenize
         inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
         text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
-
-        # Force "Future" as the first token by prepending its embedding
-        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
-        forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
-        
-        # Get embedding for "Future" token
-        batch_size = len(ego_positions)
-        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
-        future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
         
         # 5. Concatenate [Image, Text]
-        combined_embeddings = torch.cat([projected_image_features, text_embeddings, future_embedding], dim=1)
+        combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
 
-        # # 6. Attention Mask
-        # image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
-        # combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
-
-        # Create attention mask for combined embeddings
-        attention_mask = torch.ones(
-            (batch_size, combined_embeddings.shape[1]),
-            dtype=torch.long,
-            device=self.device
-        )
+        # 6. Attention Mask
+        image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
+        combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
 
         # 7. Generate
         outputs = self.language_model.generate(
             inputs_embeds=combined_embeddings,
-            attention_mask=attention_mask,
+            attention_mask=combined_attention_mask,
             max_new_tokens=2048,
+            min_new_tokens=50,
             pad_token_id=self.tokenizer.eos_token_id,
-            # eos_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
             do_sample=False,
+            num_beams=1, 
             output_scores=True,
             return_dict_in_generate=True
         )
@@ -178,6 +143,13 @@ class QwenCLIPModel(nn.Module):
         generated_ids = outputs.sequences
         generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         return outputs, generated_text
+    
+    def generateMotion(self, images, lidar, ego_pos_global):
+        # Prepare Inputs
+        pixel_values = self.image_processor(images=images, return_tensors='pt').pixel_values.to(self.device)
+        _, gen_text = self.generate_trajectory(pixel_values, ego_pos_global)
+        return gen_text
+
 
     def _load_checkpoint_weights(self, checkpoint_data):
         """Load weights from checkpoint dict into model components."""
@@ -188,10 +160,11 @@ class QwenCLIPModel(nn.Module):
         if 'language_model_state_dict' in checkpoint_data:
             # Full checkpoint
             self.language_model.load_state_dict(checkpoint_data['language_model_state_dict'], strict=False)
+            print(colored("✓ Loaded LLM", "green"))
+
+        if 'vision_tower_state_dict' in checkpoint_data:
             self.vision_tower.load_state_dict(checkpoint_data['vision_tower_state_dict'])
-            self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'] if 'model_state_dict' in checkpoint_data else checkpoint_data['mlp_projector_state_dict'])
-            print(colored("✓ Loaded LLM + vision encoder + MLP projector", "green"))
-        else:
-            # MLP-only checkpoint
-            self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'])
-            print(colored("✓ Loaded MLP projector", "green"))
+            print(colored("✓ Loaded Vision Encoder", "green"))
+
+        self.mlp_projector.load_state_dict(checkpoint_data['model_state_dict'] if 'model_state_dict' in checkpoint_data else checkpoint_data['mlp_projector_state_dict'])
+        print(colored("✓ Loaded MLP projector", "green"))

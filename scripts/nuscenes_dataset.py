@@ -1,17 +1,15 @@
 import os
-import sys
 from termcolor import colored
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
-from pyquaternion import Quaternion
 
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
 
 class NuScenesDataset(Dataset):
-    def __init__(self, version, dataroot, tokenizer, prompt_part1, prompt_part2, nsweeps=5):
+    def __init__(self, version, dataroot, tokenizer, prompt_part1, prompt_part2, nsweeps=5, output_lidar=False):
         """
         Initialize the NuScenes dataset for use with PyTorch.
         Serves EGOCENTRIC (Local) coordinates with metadata for Global reconstruction.
@@ -19,6 +17,7 @@ class NuScenesDataset(Dataset):
         print(colored(f"Initializing NuScenes dataset with version {version} at {dataroot}", "cyan"))
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.nsweeps = nsweeps 
+        self.output_lidar = output_lidar
 
         self.tokenizer = tokenizer
         self.prompt_part1 = prompt_part1
@@ -52,9 +51,6 @@ class NuScenesDataset(Dataset):
         cam_token = sample['data']['CAM_FRONT']
         cam_data = self.nusc.get('sample_data', cam_token)
         ego_pose_curr = self.nusc.get('ego_pose', cam_data['ego_pose_token'])
-        
-        ego_trans = np.array(ego_pose_curr['translation'])
-        ego_rot = Quaternion(ego_pose_curr['rotation'])
 
         # 2. Get History (10 frames)
         history_points = []
@@ -82,41 +78,40 @@ class NuScenesDataset(Dataset):
             future_points.append(np.array(e_pose['translation']))
         
         while len(future_points) < 10:
-            future_points.append(future_points[-1] if len(future_points) > 0 else ego_trans)
-
-        # 4. Transform to Local Coordinates
-        history_local = []
-        for p in history_points:
-            diff = p - ego_trans
-            local_p = ego_rot.inverse.rotate(diff)
-            history_local.append(local_p[:2])
-
-        future_local = []
-        for p in future_points:
-            diff = p - ego_trans
-            local_p = ego_rot.inverse.rotate(diff)
-            future_local.append(local_p[:2])
+            future_points.append(future_points[-1] if len(future_points) > 0 else np.array(ego_pose_curr['translation']))
 
         # 5. Load Image
         image_path = os.path.join(self.nusc.dataroot, cam_data['filename'])
         image = Image.open(image_path).convert('RGB')
+
+        # 6. Load lidar
+        torch_pointcloud = None
+        if self.output_lidar:
+            nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
+                self.nusc,
+                sample,
+                chan='LIDAR_TOP',
+                ref_chan='LIDAR_TOP',
+                nsweeps=self.nsweeps, # TODO: This isn't working right now
+                min_distance=1.0  # Filter out points closer than 1 meter
+            )
+            torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points.T).float()
         
-        # 6. Format Text Prompt (CORRECTED FORMATTING)
-        pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in history_local])
+        # 7. Format Text Prompt
+        pos_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in history_points])
         prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
         
-        # FIX: Add outer brackets to match the prompt's requested format: "[[x,y], [x,y]...]"
-        wp_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in future_local])
+        wp_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in future_points])
         target_text = "Future Trajectory: [" + wp_str + "]"
         
         full_text = prompt + target_text
         
-        # 7. Tokenize & Mask
+        # 8. Tokenize & Mask
         input_ids = self.tokenizer(
             full_text, 
             return_tensors="pt", 
             padding="max_length", 
-            max_length=512, 
+            max_length=2048,
             truncation=True
         ).input_ids.squeeze(0)
         
@@ -132,14 +127,25 @@ class NuScenesDataset(Dataset):
             labels[:prompt_len] = -100
         else:
             labels[:] = -100 # Safety fallback if truncation cut off the target
+        
+        # Calibration
+        cam_calib = self.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
 
         return {
             'image': image,
+            'lidar': torch_pointcloud,
             'input_ids': input_ids,
             'labels': labels,
-            'ego_positions': history_local,
-            'waypoints': future_local,
-            'ego_translation': ego_trans,
-            'ego_rotation': ego_rot.elements
+            'ego_positions': history_points,
+            'waypoints': future_points,
+            'cam_to_ego': {
+                'translation': cam_calib['translation'],
+                'rotation': cam_calib['rotation'],
+                'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
+            },
+            'ego_to_world': {
+                'translation': ego_pose_curr['translation'],
+                'rotation': ego_pose_curr['rotation']
+            }
         }
     

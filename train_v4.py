@@ -38,7 +38,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train the QwenCLIPModel on the NuScenes dataset.")
     parser.add_argument("--version", type=str, default='v1.0-trainval', help="Version of the NuScenes dataset.")
     parser.add_argument("--dataroot", type=str, default="/storage/ice-shared/cs8803vlm/rmineyev3/", help="Root directory of the dataset.")
-    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training.")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers.")
@@ -163,10 +163,7 @@ def main():
             image_inputs = model.image_processor(images=images, return_tensors="pt").to(device)
 
             optimizer.zero_grad()
-            
-            # --- CRITICAL FIX START ---
-            # Pass labels directly to the model. The model handles the shifting and loss calculation.
-            # This also handles the concatenation of image embeddings internally within the custom forward method.
+
             outputs = model(
                 images=image_inputs['pixel_values'], 
                 input_ids=input_ids, 
@@ -174,7 +171,6 @@ def main():
             )
             
             loss = outputs.loss
-            # --- CRITICAL FIX END ---
 
             loss.backward()
             optimizer.step()
