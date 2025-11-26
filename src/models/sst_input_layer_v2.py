@@ -13,6 +13,7 @@ import random
 import pickle as pkl
 import os
 
+@MODELS.register_module()
 class SSTInputLayerV2(nn.Module):
     """
     This is one of the core class of SST, converting the output of voxel_encoder to sst input.

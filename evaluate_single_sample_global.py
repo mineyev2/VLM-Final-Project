@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 Single Sample Evaluation Script for Multimodal LiDAR+CLIP+Qwen Model
-Evaluates one specific sample by index and displays detailed results with visualization.
+(Using GLOBAL/WORLD Coordinate System)
+
+Evaluates one specific sample by index or token and displays detailed results with visualization.
+
+COORDINATE SYSTEM:
+- All ego positions (history) are in GLOBAL/WORLD frame
+- All waypoints (ground truth and predictions) are in GLOBAL/WORLD frame
+- Coordinates are absolute world positions (x, y) in meters
+- NO ego-centric transformation applied
 """
 
 import os
@@ -47,10 +55,10 @@ def parse_coords_from_text(text, max_points=10):
 
 
 def visualize_trajectories_with_metrics(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to_ego, ego_to_world, idx, output_path, metrics):
-    """Overlay trajectories and metrics on the image."""
+    """Overlay trajectories and metrics on the image.
     
-    if pred_waypoints_2d.shape[0] == 0 or len(pred_waypoints_2d.shape) != 2:
-        return
+    Note: gt_waypoints_2d and pred_waypoints_2d are in GLOBAL/WORLD frame coordinates.
+    """
     
     img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     
@@ -58,37 +66,30 @@ def visualize_trajectories_with_metrics(image_pil, gt_waypoints_2d, pred_waypoin
     gt_waypoints_2d = np.array(gt_waypoints_2d) if isinstance(gt_waypoints_2d, list) else gt_waypoints_2d
     pred_waypoints_2d = np.array(pred_waypoints_2d) if isinstance(pred_waypoints_2d, list) else pred_waypoints_2d
     
-    # Add z=0 to make 3D points in local frame
-    gt_waypoints_3d_local = np.hstack([gt_waypoints_2d, np.zeros((len(gt_waypoints_2d), 1))])
-    pred_waypoints_3d_local = np.hstack([pred_waypoints_2d, np.zeros((len(pred_waypoints_2d), 1))])
+    # Add z=0 to make 3D points - already in WORLD frame
+    gt_waypoints_3d_world = np.hstack([gt_waypoints_2d, np.zeros((len(gt_waypoints_2d), 1))])
     
-    # Transform from local/ego frame to world frame
-    ego_translation = np.array(ego_to_world['translation'])
-    ego_rotation = Quaternion(ego_to_world['rotation'])
+    # Handle predictions - may be empty
+    if pred_waypoints_2d.shape[0] > 0 and len(pred_waypoints_2d.shape) == 2:
+        pred_waypoints_3d_world = np.hstack([pred_waypoints_2d, np.zeros((len(pred_waypoints_2d), 1))])
+    else:
+        pred_waypoints_3d_world = np.array([]).reshape(0, 3)
     
-    # Transform GT waypoints: local → world
-    gt_waypoints_3d_world = []
-    for local_pt in gt_waypoints_3d_local:
-        world_pt = ego_rotation.rotate(local_pt) + ego_translation
-        gt_waypoints_3d_world.append(world_pt)
-    
-    # Transform predicted waypoints: local → world
-    pred_waypoints_3d_world = []
-    valid_pred_mask = ~np.isnan(pred_waypoints_3d_local).any(axis=1)
-    for i, local_pt in enumerate(pred_waypoints_3d_local):
-        if valid_pred_mask[i]:
-            world_pt = ego_rotation.rotate(local_pt) + ego_translation
-            pred_waypoints_3d_world.append(world_pt)
+    # Filter out NaN predictions
+    if len(pred_waypoints_3d_world) > 0:
+        valid_pred_mask = ~np.isnan(pred_waypoints_3d_world).any(axis=1)
+        pred_waypoints_3d_world_valid = pred_waypoints_3d_world[valid_pred_mask]
+    else:
+        pred_waypoints_3d_world_valid = pred_waypoints_3d_world
     
     # Project to image coordinates
     try:
-        gt_points_img = ProjectWorldToImage(gt_waypoints_3d_world, cam_to_ego, ego_to_world)
-        pred_points_img = ProjectWorldToImage(pred_waypoints_3d_world, cam_to_ego, ego_to_world) if len(pred_waypoints_3d_world) > 0 else []
+        gt_points_img = ProjectWorldToImage(gt_waypoints_3d_world.tolist(), cam_to_ego, ego_to_world)
         
         # Draw GT trajectory polygon (green)
         if len(gt_waypoints_3d_world) > 1:
-            gt_left_3d = OffsetTrajectory3D(np.array(gt_waypoints_3d_world), -1.73 / 2)
-            gt_right_3d = OffsetTrajectory3D(np.array(gt_waypoints_3d_world), 1.73 / 2)
+            gt_left_3d = OffsetTrajectory3D(gt_waypoints_3d_world, -1.73 / 2)
+            gt_right_3d = OffsetTrajectory3D(gt_waypoints_3d_world, 1.73 / 2)
             gt_left_img = ProjectWorldToImage(gt_left_3d.tolist(), cam_to_ego, ego_to_world)
             gt_right_img = ProjectWorldToImage(gt_right_3d.tolist(), cam_to_ego, ego_to_world)
             
@@ -100,9 +101,9 @@ def visualize_trajectories_with_metrics(image_pil, gt_waypoints_2d, pred_waypoin
                 img[mask_gt] = cv2.addWeighted(img, 0.5, frame_gt, 0.5, 0)[mask_gt]
         
         # Draw predicted trajectory polygon (orange)
-        if len(pred_waypoints_3d_world) > 1:
-            pred_left_3d = OffsetTrajectory3D(np.array(pred_waypoints_3d_world), -1.73 / 2)
-            pred_right_3d = OffsetTrajectory3D(np.array(pred_waypoints_3d_world), 1.73 / 2)
+        if len(pred_waypoints_3d_world_valid) > 1:
+            pred_left_3d = OffsetTrajectory3D(pred_waypoints_3d_world_valid, -1.73 / 2)
+            pred_right_3d = OffsetTrajectory3D(pred_waypoints_3d_world_valid, 1.73 / 2)
             pred_left_img = ProjectWorldToImage(pred_left_3d.tolist(), cam_to_ego, ego_to_world)
             pred_right_img = ProjectWorldToImage(pred_right_3d.tolist(), cam_to_ego, ego_to_world)
             
@@ -116,8 +117,10 @@ def visualize_trajectories_with_metrics(image_pil, gt_waypoints_2d, pred_waypoin
         # Draw waypoint markers
         for pt in gt_points_img:
             cv2.circle(img, tuple(pt.astype(int)), radius=8, color=(0, 255, 0), thickness=-1)
-        for pt in pred_points_img:
-            cv2.circle(img, tuple(pt.astype(int)), radius=8, color=(0, 125, 255), thickness=-1)
+        if len(pred_waypoints_3d_world_valid) > 0:
+            pred_points_img = ProjectWorldToImage(pred_waypoints_3d_world_valid.tolist(), cam_to_ego, ego_to_world)
+            for pt in pred_points_img:
+                cv2.circle(img, tuple(pt.astype(int)), radius=8, color=(0, 125, 255), thickness=-1)
         
         # Add legend
         cv2.putText(img, 'Green: Ground Truth', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -162,10 +165,10 @@ def visualize_trajectories_with_metrics(image_pil, gt_waypoints_2d, pred_waypoin
 
 
 def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to_ego, ego_to_world, idx, output_path):
-    """Overlay ground truth and predicted trajectories on the image."""
+    """Overlay ground truth and predicted trajectories on the image.
     
-    if pred_waypoints_2d.shape[0] == 0 or len(pred_waypoints_2d.shape) != 2:
-        return
+    Note: gt_waypoints_2d and pred_waypoints_2d are in GLOBAL/WORLD frame coordinates.
+    """
     
     img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     
@@ -173,36 +176,29 @@ def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to
     gt_waypoints_2d = np.array(gt_waypoints_2d) if isinstance(gt_waypoints_2d, list) else gt_waypoints_2d
     pred_waypoints_2d = np.array(pred_waypoints_2d) if isinstance(pred_waypoints_2d, list) else pred_waypoints_2d
     
-    # Add z=0 to make 3D points in local frame
-    gt_waypoints_3d_local = np.hstack([gt_waypoints_2d, np.zeros((len(gt_waypoints_2d), 1))])
-    pred_waypoints_3d_local = np.hstack([pred_waypoints_2d, np.zeros((len(pred_waypoints_2d), 1))])
+    # Add z=0 to make 3D points - already in WORLD frame
+    gt_waypoints_3d_world = np.hstack([gt_waypoints_2d, np.zeros((len(gt_waypoints_2d), 1))])
     
-    # Transform from local/ego frame to world frame
-    ego_translation = np.array(ego_to_world['translation'])
-    ego_rotation = Quaternion(ego_to_world['rotation'])
+    # Handle predictions - may be empty
+    if pred_waypoints_2d.shape[0] > 0 and len(pred_waypoints_2d.shape) == 2:
+        pred_waypoints_3d_world = np.hstack([pred_waypoints_2d, np.zeros((len(pred_waypoints_2d), 1))])
+    else:
+        pred_waypoints_3d_world = np.array([]).reshape(0, 3)
     
-    # Transform GT waypoints: local → world
-    gt_waypoints_3d_world = []
-    for local_pt in gt_waypoints_3d_local:
-        world_pt = ego_rotation.rotate(local_pt) + ego_translation
-        gt_waypoints_3d_world.append(world_pt)
-    
-    # Transform predicted waypoints: local → world
-    pred_waypoints_3d_world = []
-    valid_pred_mask = ~np.isnan(pred_waypoints_3d_local).any(axis=1)
-    for i, local_pt in enumerate(pred_waypoints_3d_local):
-        if valid_pred_mask[i]:
-            world_pt = ego_rotation.rotate(local_pt) + ego_translation
-            pred_waypoints_3d_world.append(world_pt)
+    # Filter out NaN predictions
+    if len(pred_waypoints_3d_world) > 0:
+        valid_pred_mask = ~np.isnan(pred_waypoints_3d_world).any(axis=1)
+        pred_waypoints_3d_world_valid = pred_waypoints_3d_world[valid_pred_mask]
+    else:
+        pred_waypoints_3d_world_valid = pred_waypoints_3d_world
     
     try:
-        # Now project world coordinates to image
-        gt_points_img = ProjectWorldToImage(gt_waypoints_3d_world, cam_to_ego, ego_to_world)
+        # Project world coordinates to image
+        gt_points_img = ProjectWorldToImage(gt_waypoints_3d_world.tolist(), cam_to_ego, ego_to_world)
         
         if len(gt_waypoints_3d_world) > 1:
-            gt_waypoints_3d_array = np.array(gt_waypoints_3d_world)
-            gt_left_3d = OffsetTrajectory3D(gt_waypoints_3d_array, -1.73 / 2)
-            gt_right_3d = OffsetTrajectory3D(gt_waypoints_3d_array, 1.73 / 2)
+            gt_left_3d = OffsetTrajectory3D(gt_waypoints_3d_world, -1.73 / 2)
+            gt_right_3d = OffsetTrajectory3D(gt_waypoints_3d_world, 1.73 / 2)
             gt_left_img = ProjectWorldToImage(gt_left_3d.tolist(), cam_to_ego, ego_to_world)
             gt_right_img = ProjectWorldToImage(gt_right_3d.tolist(), cam_to_ego, ego_to_world)
             
@@ -216,13 +212,12 @@ def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to
         for pt in gt_points_img:
             cv2.circle(img, tuple(pt.astype(int)), radius=8, color=(0, 255, 0), thickness=-1)
         
-        if len(pred_waypoints_3d_world) > 0:
-            pred_points_img = ProjectWorldToImage(pred_waypoints_3d_world, cam_to_ego, ego_to_world)
+        if len(pred_waypoints_3d_world_valid) > 0:
+            pred_points_img = ProjectWorldToImage(pred_waypoints_3d_world_valid.tolist(), cam_to_ego, ego_to_world)
             
-            if len(pred_waypoints_3d_world) > 1:
-                pred_waypoints_3d_array = np.array(pred_waypoints_3d_world)
-                pred_left_3d = OffsetTrajectory3D(pred_waypoints_3d_array, -1.73 / 2)
-                pred_right_3d = OffsetTrajectory3D(pred_waypoints_3d_array, 1.73 / 2)
+            if len(pred_waypoints_3d_world_valid) > 1:
+                pred_left_3d = OffsetTrajectory3D(pred_waypoints_3d_world_valid, -1.73 / 2)
+                pred_right_3d = OffsetTrajectory3D(pred_waypoints_3d_world_valid, 1.73 / 2)
                 pred_left_img = ProjectWorldToImage(pred_left_3d.tolist(), cam_to_ego, ego_to_world)
                 pred_right_img = ProjectWorldToImage(pred_right_3d.tolist(), cam_to_ego, ego_to_world)
                 
@@ -246,17 +241,17 @@ def visualize_trajectories(image_pil, gt_waypoints_2d, pred_waypoints_2d, cam_to
         print(colored(f"Visualization failed: {e}", "red"))
 
 
-def visualize_trajectory_bev(nusc, sample_token, gt_waypoints_local, pred_waypoints_local, ego_translation, ego_rotation, output_path):
+def visualize_trajectory_bev(nusc, sample_token, gt_waypoints_global, pred_waypoints_global, ego_translation, ego_rotation, output_path):
     """Add trajectory overlay to bird's eye view image.
     
     BEV is rendered in ego vehicle frame (use_flat_vehicle_coordinates=True by default).
-    Our waypoints are already in local/ego frame, so we just need to convert to pixel coordinates.
+    Our waypoints are in global/world frame, so we need to transform to ego frame for BEV.
     
     Args:
         nusc: NuScenes instance
         sample_token: Sample token for rendering
-        gt_waypoints_local: Ground truth waypoints in local/ego frame (N, 2)
-        pred_waypoints_local: Predicted waypoints in local/ego frame (N, 2)
+        gt_waypoints_global: Ground truth waypoints in global/world frame (N, 2)
+        pred_waypoints_global: Predicted waypoints in global/world frame (N, 2)
         ego_translation: Current ego vehicle translation (world coordinates)
         ego_rotation: Current ego vehicle rotation quaternion
         output_path: Path to save the output image
@@ -302,27 +297,45 @@ def visualize_trajectory_bev(nusc, sample_token, gt_waypoints_local, pred_waypoi
         center_x = width / 2
         center_y = height / 2
         
-        # Convert local/ego coordinates to pixel coordinates
-        # Waypoints are already in ego frame, just need to convert to pixels
-        def local_to_pixel(waypoints_local):
-            """Convert local/ego frame coordinates to pixel coordinates."""
-            # waypoints_local is already in ego frame (forward=x, left=y)
-            # BEV pixel coordinates: center is ego vehicle
-            pixel_x = center_x + waypoints_local[:, 0] * pixels_per_meter
-            pixel_y = center_y - waypoints_local[:, 1] * pixels_per_meter  # Flipped y-axis
+        # Convert global/world coordinates to ego frame, then to pixel coordinates
+        def world_to_pixel(waypoints_world, ego_translation, ego_rotation):
+            """Convert world frame coordinates to pixel coordinates via ego frame."""
+            # Translate to ego-relative coordinates
+            rel_x = waypoints_world[:, 0] - ego_translation[0]
+            rel_y = waypoints_world[:, 1] - ego_translation[1]
+            
+            # Stack into 2D points for rotation
+            rel_points = np.vstack([rel_x, rel_y])
+            
+            # Rotate from world frame to ego frame
+            yaw = ego_rotation.yaw_pitch_roll[0]
+            cos_yaw = np.cos(-yaw)  # Negative yaw to rotate world to ego
+            sin_yaw = np.sin(-yaw)
+            rotation_matrix = np.array([
+                [cos_yaw, -sin_yaw],
+                [sin_yaw, cos_yaw]
+            ])
+            
+            # Apply rotation
+            ego_points = rotation_matrix @ rel_points
+            
+            # Convert to pixel coordinates
+            pixel_x = center_x + ego_points[0, :] * pixels_per_meter
+            pixel_y = center_y - ego_points[1, :] * pixels_per_meter  # Flipped y-axis
+            
             return pixel_x, pixel_y
         
         # Plot ground truth trajectory (green/lime)
-        if len(gt_waypoints_local) > 0:
-            gt_px, gt_py = local_to_pixel(gt_waypoints_local)
+        if len(gt_waypoints_global) > 0:
+            gt_px, gt_py = world_to_pixel(gt_waypoints_global, ego_translation, ego_rotation)
             ax.plot(gt_px, gt_py, 'o-', color='lime', linewidth=3, markersize=8, label='Ground Truth')
         
         # Plot predicted trajectory (orange)
         # Filter out NaN values
-        valid_mask = ~np.isnan(pred_waypoints_local).any(axis=1)
-        valid_pred = pred_waypoints_local[valid_mask]
+        valid_mask = ~np.isnan(pred_waypoints_global).any(axis=1)
+        valid_pred = pred_waypoints_global[valid_mask]
         if len(valid_pred) > 0:
-            pred_px, pred_py = local_to_pixel(valid_pred)
+            pred_px, pred_py = world_to_pixel(valid_pred, ego_translation, ego_rotation)
             ax.plot(pred_px, pred_py, 'o-', color='orange', linewidth=3, markersize=8, label='Predicted')
         
         # Add ego vehicle marker at center
@@ -364,7 +377,7 @@ class EvalNuScenes:
                 continue
             first_sample_token = scene['first_sample_token']
             sample = self.nusc.get('sample', first_sample_token)
-            for _ in range(9):  # Skip first 9 samples
+            for _ in range(9):
                 sample = self.nusc.get('sample', sample['next'])
             for _ in range(nbr_samples - 19):
                 self.sample_tokens.append(sample['token'])
@@ -383,7 +396,7 @@ class EvalNuScenes:
         return self._get_item_from_sample(sample)
     
     def _get_item_from_sample(self, sample):
-        """Internal method to get item data from a sample."""
+        """Internal method to get item data from a sample - GLOBAL/WORLD coordinates."""
         sample_token = sample['token']
 
         cam_token = sample['data']['CAM_FRONT']
@@ -421,18 +434,14 @@ class EvalNuScenes:
         while len(future_points) < 10:
             future_points.append(future_points[-1] if len(future_points) > 0 else ego_trans)
 
-        # Transform to Local Coordinates
-        history_local = []
+        # Keep in Global/World Coordinates (NO transformation to local)
+        history_global = []
         for p in history_points:
-            diff = p - ego_trans
-            local_p = ego_rot.inverse.rotate(diff)
-            history_local.append(local_p[:2])
+            history_global.append(p[:2])  # p is already [x, y, z] in world frame
 
-        future_local = []
+        future_global = []
         for p in future_points:
-            diff = p - ego_trans
-            local_p = ego_rot.inverse.rotate(diff)
-            future_local.append(local_p[:2])
+            future_global.append(p[:2])  # p is already [x, y, z] in world frame
 
         camera_token = sample['data']['CAM_FRONT']
         camera_data = self.nusc.get('sample_data', camera_token)
@@ -463,8 +472,8 @@ class EvalNuScenes:
 
         return {
             'image': image,
-            'ego_positions': history_local,
-            'waypoints': future_local,
+            'ego_positions': history_global,  # CHANGED: Now in global/world coordinates
+            'waypoints': future_global,       # CHANGED: Now in global/world coordinates
             'cam_to_ego': cam_to_ego,
             'ego_to_world': ego_to_world,
             'lidar': torch_pointcloud,
@@ -507,7 +516,7 @@ def evaluate_single_sample(args):
         torch.cuda.empty_cache()
     
     print(colored("\n" + "="*70, "cyan"))
-    print(colored("Single Sample Evaluation", "cyan", attrs=['bold']))
+    print(colored("Single Sample Evaluation (GLOBAL/WORLD Coordinates)", "cyan", attrs=['bold']))
     if args.sample_idx is not None:
         print(colored(f"Sample Index: {args.sample_idx}", "cyan", attrs=['bold']))
     else:
@@ -538,7 +547,6 @@ def evaluate_single_sample(args):
     # Load dataset
     ds = EvalNuScenes(args.version, args.dataroot, model.prompt_part1, model.prompt_part2, nsweeps=args.nsweeps)
     
-
     while True:
         # Get sample - either by index or by token
         if args.sample_idx is not None:
@@ -557,8 +565,8 @@ def evaluate_single_sample(args):
         
         # Get sample data
         image = item['image']
-        ego_positions = item['ego_positions']
-        gt_waypoints = item['waypoints']
+        ego_positions = item['ego_positions']  # GLOBAL/WORLD coordinates
+        gt_waypoints = item['waypoints']       # GLOBAL/WORLD coordinates
         cam_to_ego = item['cam_to_ego']
         ego_to_world = item['ego_to_world']
         lidar = item['lidar']
@@ -570,9 +578,9 @@ def evaluate_single_sample(args):
         lidar_device = [lidar.to(device)] if not args.disable_lidar else None
         ego_positions_py = [[float(x), float(y)] for (x, y) in ego_positions]
         
-        print(colored("Input History (10 positions):", "cyan"))
+        print(colored("Input History (10 positions in GLOBAL/WORLD frame):", "cyan"))
         for h_idx, pos in enumerate(ego_positions):
-            print(f"  Frame {h_idx}: [{pos[0]:.2f}, {pos[1]:.2f}]")
+            print(f"  Frame {h_idx}: [{pos[0]:.2f}, {pos[1]:.2f}] (world coordinates)")
         
         # Generate prediction
         print(colored("\nGenerating prediction...", "yellow"))
@@ -608,7 +616,7 @@ def evaluate_single_sample(args):
         
         # Print results
         print(colored("\n" + "="*70, "magenta"))
-        print(colored("RESULTS", "magenta", attrs=['bold']))
+        print(colored("RESULTS (GLOBAL/WORLD Coordinates)", "magenta", attrs=['bold']))
         print(colored("="*70, "magenta"))
         
         print(colored("\nGenerated Text:", "cyan"))
@@ -622,7 +630,7 @@ def evaluate_single_sample(args):
         print(f"  Error @ 1s: {error_at_1s:.4f} m")
         print(f"  Failure (>10m @ 1s): {failure_rate}")
         
-        print(colored("\nWaypoint-by-Waypoint Comparison:", "cyan"))
+        print(colored("\nWaypoint-by-Waypoint Comparison (GLOBAL/WORLD frame):", "cyan"))
         for k in range(min(10, len(gt_wp))):
             if not np.isnan(pred_coords[k][0]):
                 p_str = f"[{pred_coords[k][0]:7.2f}, {pred_coords[k][1]:7.2f}]"
@@ -634,7 +642,7 @@ def evaluate_single_sample(args):
             print(f"  Waypoint {k}: GT [{gt_wp[k][0]:7.2f}, {gt_wp[k][1]:7.2f}]  ->  Pred: {p_str} {err_str}")
         
         # Create output directory (clear existing contents)
-        output_dir = 'eval_outputs/lidar_single_sample'
+        output_dir = 'eval_outputs/lidar_single_sample_global'
         if os.path.exists(output_dir):
             import shutil
             shutil.rmtree(output_dir)
@@ -676,7 +684,7 @@ def evaluate_single_sample(args):
             pred_waypoints_valid,
             cam_to_ego,
             ego_to_world,
-            args.sample_idx,
+            0,
             output_path_metrics,
             metrics_dict
         )
@@ -713,8 +721,9 @@ def evaluate_single_sample(args):
             print(colored("Invalid input. Please enter a valid integer index or 'exit'.", "red"))
             break
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Evaluate Single Sample - Multimodal LiDAR+CLIP+Qwen Model')
+    parser = argparse.ArgumentParser(description='Evaluate Single Sample - Multimodal LiDAR+CLIP+Qwen Model (GLOBAL Coordinates)')
 
     # Important arguments
     parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')

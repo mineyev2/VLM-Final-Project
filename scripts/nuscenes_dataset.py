@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
+from pyquaternion import Quaternion
 
 from nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud
