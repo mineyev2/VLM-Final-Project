@@ -117,7 +117,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
     if hasattr(model, "language_model") and not model.freeze_llm:
         checkpoint['llm_state_dict'] = model.language_model.state_dict()
 
-    if hasattr(model, "lidar_projector"):
+    if hasattr(model, "lidar_projector"): # Make sure we only run if we are using lidar
         checkpoint['lidar_projector_state_dict'] = model.lidar_projector.state_dict()
     
     torch.save(checkpoint, save_path)
