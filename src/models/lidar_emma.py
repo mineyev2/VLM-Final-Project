@@ -10,6 +10,8 @@ from src.models.base_model import BaseModel
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
 from .sst import LidarEncoderSST
 
+from scripts.token_learner import TokenLearner
+
 project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 
 
@@ -32,12 +34,14 @@ class LidarEMMA(BaseModel):
         lidarclip_checkpoint_path=None,
         freeze_encoders=True,
         freeze_llm=True,
-        use_lidar=False
+        use_lidar=False,
+        lidar_pooling=False,
     ):
         super().__init__()
 
         self.device = device
         self.use_lidar = use_lidar
+        self.lidar_pooling = lidar_pooling
         print(f"\n{'='*70}")
         print(f"Initializing LidarEMMA on device: {self.device}")
         print(f"{'='*70}\n")
@@ -86,6 +90,12 @@ class LidarEMMA(BaseModel):
                 import traceback
                 traceback.print_exc()
                 raise
+            
+            # Only use TokenLearner if pooling is disabled for lidar features
+            if not lidar_pooling:
+                self.lidar_token_learner = TokenLearner(in_channels=self.lidar_encoder.out_channels,
+                                               num_tokens=256)
+
         else:
             print(colored("      Skipping LiDAR encoder setup (use_lidar=False)", "yellow"))
             self.lidar_encoder = None # TODO: Necessary?
@@ -106,7 +116,7 @@ class LidarEMMA(BaseModel):
         except Exception as e:
             print(f"      ✗ Failed to load Qwen: {e}")
             raise
-
+        
         lidar_output_size = clip_hidden_size  # By construction: SST -> AttentionPool -> CLIP-dim
 
         # ================================
@@ -125,13 +135,23 @@ class LidarEMMA(BaseModel):
             ).to(self.device).to(self.language_model.dtype)
 
             if self.use_lidar:
-                self.lidar_projector = nn.Sequential(
-                    nn.Linear(lidar_output_size, proj_w),
-                    nn.GELU(),
-                    nn.Linear(proj_w, proj_w),
-                    nn.GELU(),
-                    nn.Linear(proj_w, qwen_hidden_size),
-                ).to(self.device).to(self.language_model.dtype)
+                if not lidar_pooling:
+                    self.lidar_projector = nn.Sequential(
+                        self.lidar_token_learner,
+                        nn.Linear(self.lidar_encoder.out_channels, proj_w),
+                        nn.GELU(),
+                        nn.Linear(proj_w, proj_w),
+                        nn.GELU(),
+                        nn.Linear(proj_w, qwen_hidden_size),
+                    ).to(self.device).to(self.language_model.dtype)
+                else:
+                    self.lidar_projector = nn.Sequential(
+                        nn.Linear(lidar_output_size, proj_w),
+                        nn.GELU(),
+                        nn.Linear(proj_w, proj_w),
+                        nn.GELU(),
+                        nn.Linear(proj_w, qwen_hidden_size),
+                    ).to(self.device).to(self.language_model.dtype)
             
             print(f"      ✓ Projector(s) initialized")
             print(f"        Vision: {clip_hidden_size} → {proj_w} → {qwen_hidden_size}")
@@ -254,14 +274,20 @@ class LidarEMMA(BaseModel):
             with torch.no_grad() if not self.lidar_encoder.training else torch.enable_grad():
                 if return_features:
                     lidar_features, attn_weights = self.lidar_encoder(
-                        point_clouds, return_attention=True
+                        point_clouds,
+                        no_pooling=(not self.lidar_pooling),
+                        return_attention=True
                     )
                 else:
-                    lidar_features = self.lidar_encoder(point_clouds) # TODO: Enable no pooling?
+                    # Using TokenLearner to compress information
+                    lidar_features = self.lidar_encoder(point_clouds,
+                                                        no_pooling=(not self.lidar_pooling))
                     attn_weights = None
-
+            
+            if self.lidar_pooling:
+                lidar_features = lidar_features.unsqueeze(1)  # [B, 1, D]
+            
             # Match sequence shape: add single "token" for LiDAR
-            lidar_features = lidar_features.unsqueeze(1)  # [B, 1, D]
             projected_lidar = self.lidar_projector(lidar_features.to(dtype))
             multimodal_embeddings.append(projected_lidar)
             multimodal_len += projected_lidar.shape[1]
@@ -332,8 +358,8 @@ class LidarEMMA(BaseModel):
             final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
             prompts.append(final_prompt)
 
-        if self.llm == "Qwen/Qwen3-4B": # TODO: Change model name
-            print(colored("Using Qwen3-4B prompt template...", "cyan"))
+        if self.llm == "Qwen/Qwen2.5-3B":
+            print(colored("Using Qwen2.5-3B prompt template...", "cyan"))
             full_prompts = [self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True, enable_thinking=False
             ) for p in prompts]

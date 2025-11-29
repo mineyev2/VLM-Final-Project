@@ -337,6 +337,7 @@ class LidarEncoderSST(nn.Module):
         backbone_config = cfg.model.get('backbone', {})
         backbone_output_shape = backbone_config.get('output_shape', [80, 80])
         backbone_channels = backbone_config.get('conv_out_channel', 128)
+        self.out_channels = backbone_channels
         
         print(f"\n[LidarEncoderSST] Building attention pooler...")
         print(f"  Input: [{backbone_channels}, {backbone_output_shape[0]}, {backbone_output_shape[1]}]")
