@@ -2,6 +2,11 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainingArgs:
+    # Default values from Lidar training code
+    warmup_epochs: int = 5
+    grad_clip: float = 1.0
+    log_freq: int = 10
+    # Other params
     llm: str = None
     freeze_encoder: bool = True
     freeze_lang_model: bool = True

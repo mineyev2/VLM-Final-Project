@@ -255,6 +255,8 @@ class LidarEMMA(BaseModel):
                 features_dict['lidar'] = lidar_features.squeeze(1).to(dtype)
                 if attn_weights is not None:
                     features_dict['lidar_attention'] = attn_weights
+        else:
+            print(colored("Warning: No LiDAR input provided to forward()", "yellow"))
 
         # -------- Text ----------
         if input_ids is None:
@@ -297,7 +299,7 @@ class LidarEMMA(BaseModel):
 
         if return_features:
             return outputs.logits, features_dict
-        return outputs.logits
+        return outputs
 
     # =========================================================================
     def generate_trajectory(self, images, point_clouds, ego_positions):

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
 # Local files
 from src.models.qwen_clip_model import QwenCLIPModel
@@ -95,6 +96,60 @@ def count_trainable_params(model):
     
     return trainable_params, total_params
 
+def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_path):
+    """Save training checkpoint."""
+    checkpoint = {
+        'epoch': epoch,
+        'global_step': global_step,
+        'vision_projector_state_dict': model.vision_projector.state_dict(),
+        'lidar_projector_state_dict': model.lidar_projector.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+        'loss': loss,
+    }
+    
+    # Optionally save encoder states if they were trained
+    if hasattr(model, "vision_tower") and not model.freeze_encoders:
+        checkpoint['vision_encoder_state_dict'] = model.vision_tower.state_dict()
+    
+    if hasattr(model, "lidar_encoder") and not model.freeze_encoders:
+        checkpoint['lidar_encoder_state_dict'] = model.lidar_encoder.state_dict()
+    
+    if hasattr(model, "language_model") and not model.freeze_llm:
+        checkpoint['llm_state_dict'] = model.language_model.state_dict()
+    
+    torch.save(checkpoint, save_path)
+    logging.info(f"Checkpoint saved to {save_path}")
+
+
+def load_checkpoint(model, optimizer, scheduler, checkpoint_path, device):
+    """Load checkpoint and resume training."""
+    logging.info(f"Loading checkpoint from {checkpoint_path}...")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Load model states
+    if 'vision_projector_state_dict' in checkpoint:
+        model.vision_projector.load_state_dict(checkpoint['vision_projector_state_dict'])
+    
+    if 'lidar_projector_state_dict' in checkpoint:
+        model.lidar_projector.load_state_dict(checkpoint['lidar_projector_state_dict'])
+    
+    # Load optimizer
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # Load scheduler
+    if scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    
+    epoch = checkpoint.get('epoch', 0)
+    global_step = checkpoint.get('global_step', 0)
+    
+    logging.info(f"✓ Resumed from epoch {epoch}, step {global_step}")
+    
+    return epoch, global_step
+
 def main():
     # ========================================================================
     # Setup Logging
@@ -151,16 +206,19 @@ def main():
         if value is not None:
             setattr(args, key, value)
 
+    # 4) Store bool for using lidar
+    args.use_lidar = "lidar" in args.ablation
+
     # ========================================================================
     # Initialize Model, Dataset, Dataloader, Optimizer, Scheduler
     # ========================================================================
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}\n")
-    if device == "cuda":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device.type}\n")
+    if device.type == "cuda":
         torch.cuda.empty_cache()
         gc.collect()
     
-    if "lidar" in args.ablation:
+    if args.use_lidar:
         model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
     else:
         model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
@@ -173,7 +231,8 @@ def main():
         dataroot=args.dataroot,
         tokenizer=model.tokenizer,
         prompt_part1=model.prompt_part1,
-        prompt_part2=model.prompt_part2
+        prompt_part2=model.prompt_part2,
+        output_lidar=args.use_lidar,
     )
     print(f"✓ Dataset loaded: {len(dataset)} samples\n")
 
@@ -212,7 +271,18 @@ def main():
     
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+    # ========================================================================
+    # Resume from Checkpoint if specified
+    # =======================================================================
+
     start_epoch = 0
+    global_step = 0
+
+    # if args.resume_from: # TODO: Add in later
+    #     start_epoch, global_step = load_checkpoint(
+    #         model, optimizer, scheduler, args.resume_from, device
+    #     )
+
     loss_history = []
     wandb_run_id = None
     checkpoint = None
@@ -276,7 +346,7 @@ def main():
         wandb_run_id = wandb.run.id
 
     print(colored("--- Training Configuration ---", "cyan"))
-    if "lidar" in args.ablation:
+    if args.use_lidar:
         print(colored("Using LidarEMMA model!", "green"))
     else:
         print(colored("Using QwenCLIP model!", "green"))
@@ -311,51 +381,98 @@ def main():
     
     loss_history = []
     best_loss = float('inf')
-
-    model.train() # Setup model to training mode, according to what should be frozen/unfrozen
-
+    
     for epoch in range(start_epoch, args.epochs):
-
-        # print("\n=== Trainable Parameters in for loop (sanity check) ===")
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         # print(f"✓ {name}: {param.numel():,} params")
-        #         continue
-        #     else:
-        #         print(f"✗ {name}: {param.numel():,} params (frozen)")
-        # print("=" * 50 + "\n")
-
+        model.train()
+        
+        # Set encoder eval modes if frozen
+        if model.freeze_encoders:
+            model.vision_tower.eval()
+            model.lidar_encoder.eval()
+        if model.freeze_llm:
+            model.language_model.eval()
+        
         total_loss = 0.0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
-
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        
         for batch_idx, batch in enumerate(progress_bar):
-            images = batch['raw_images']
+            # Extract batch data
+            images = batch['images']  # List of PIL images
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             lidar_data = batch.get("lidar", None)
-
+            
+            # Process images with CLIP processor
+            pixel_values = model.image_processor(images=images, return_tensors="pt").pixel_values.to(device)
+            
             # Process LiDAR data
             point_clouds = None
-            point_clouds = [pc for pc in lidar_data if pc is not None]
-            if len(point_clouds) == 0:
-                point_clouds = None
-        
-            image_inputs = model.image_processor(images=images, return_tensors="pt").to(device)
-
-            optimizer.zero_grad()
-
-            outputs = model(
-                images=image_inputs['pixel_values'],
-                input_ids=input_ids, 
-                labels=labels,
-                # use_vision=True,
-                # use_lidar=True # Both True by default
-            )
+            if lidar_data is not None:
+                point_clouds = [pc for pc in lidar_data if pc is not None]
+                if len(point_clouds) == 0:
+                    point_clouds = None
+                else:
+                    # Move to device
+                    point_clouds = [pc.to(device) if isinstance(pc, torch.Tensor) else pc 
+                                    for pc in point_clouds]
             
-            loss = outputs.loss
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            try:
+                outputs = model(
+                    images=pixel_values,
+                    point_clouds=point_clouds,
+                    input_ids=input_ids,
+                    labels=labels,
+                    use_vision=True,
+                    use_lidar=(point_clouds is not None)
+                )
+                
+                # # ================================================================
+                # # FIX: Adjust labels to match logits length
+                # # ================================================================
+                # if logits.shape[1] != labels.shape[1]:
+                #     # Calculate number of multimodal tokens
+                #     num_multimodal_tokens = logits.shape[1] - labels.shape[1]
+                    
+                #     # Create padding with -100 (ignore_index)
+                #     padding = torch.full(
+                #         (labels.shape[0], num_multimodal_tokens),
+                #         -100,
+                #         dtype=labels.dtype,
+                #         device=labels.device
+                #     )
+                    
+                #     # Concatenate padding before labels
+                #     labels = torch.cat([padding, labels], dim=1)
+                    
+                #     # Verify shapes match
+                #     assert logits.shape[1] == labels.shape[1], \
+                #         f"Shape mismatch: logits {logits.shape[1]} vs labels {labels.shape[1]}"
 
+                # shift_logits = logits[..., :-1, :].contiguous()
+                # shift_labels = labels[..., 1:].contiguous()
+
+                # # 3. Compute Loss
+                # loss = loss_fn(
+                #     shift_logits.view(-1, shift_logits.size(-1)),
+                #     shift_labels.view(-1)
+                # )
+
+                loss = outputs.loss
+                
+            except Exception as e:
+                logging.error(f"Forward pass failed: {e}")
+                logging.error(f"Batch size: {len(images)}")
+                logging.error(f"Input IDs shape: {input_ids.shape}")
+                logging.error(f"Point clouds: {point_clouds is not None}")
+                raise
+            
+            # Backward pass
             loss.backward()
-
+            
             # Gradient clipping
             grad_norm = 0.0
             if args.grad_clip > 0:
@@ -363,86 +480,190 @@ def main():
                     model.get_trainable_parameters(),
                     max_norm=args.grad_clip
                 )
-
+            
+            # Optimizer step
             optimizer.step()
             scheduler.step()
-
+            
+            # Update metrics
             total_loss += loss.item()
-            progress_bar.set_postfix({'loss': loss.item()})
-
+            global_step += 1
+            
+            # Get current learning rate
+            current_lr = scheduler.get_last_lr()[0]
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'lr': f'{current_lr:.6f}'
+            })
+            
+            # ================================================================
+            # Enhanced WandB Logging (every log_freq steps)
+            # ================================================================
+            if (batch_idx % args.log_freq == 0):
+                log_dict = {
+                    # Loss
+                    "train/loss_step": loss.item(),
+                    
+                    # Learning rate
+                    "train/learning_rate": current_lr,
+                    
+                    # Step info
+                    "train/epoch": epoch,
+                    "train/global_step": global_step,
+                    "train/batch_idx": batch_idx,
+                    
+                    # Gradient statistics
+                    "train/grad_norm": grad_norm if args.grad_clip > 0 else 0.0,
+                }
+                
+                # Add GPU memory usage if available
+                if torch.cuda.is_available():
+                    log_dict.update({
+                        "system/gpu_memory_allocated_gb": torch.cuda.memory_allocated() / 1e9,
+                        "system/gpu_memory_reserved_gb": torch.cuda.memory_reserved() / 1e9,
+                    })
+                
+                wandb.log(log_dict)
+        
+        # ====================================================================
+        # Epoch Summary
+        # ====================================================================
         avg_epoch_loss = total_loss / len(dataloader)
         loss_history.append(avg_epoch_loss)
-        print(colored(f"Epoch {epoch + 1} complete. Average Loss: {avg_epoch_loss:.4f}", "green"))
-
-        wandb.log({"epoch": epoch + 1, "train_loss": avg_epoch_loss})
-
+        
+        print(f"\nEpoch {epoch+1}/{args.epochs} Summary:")
+        print(f"  Average Loss: {avg_epoch_loss:.4f}")
+        print(f"  Learning Rate: {current_lr:.6f}")
+        
+        # Log epoch metrics to WandB
+        epoch_log_dict = {
+            "epoch/train_loss": avg_epoch_loss,
+            "epoch/learning_rate": current_lr,
+            "epoch/number": epoch + 1,
+        }
+        
+        # Add data statistics
+        epoch_log_dict.update({
+            "data/batch_size": args.batch_size,
+            "data/num_batches": len(dataloader),
+            "data/samples_per_epoch": len(dataset),
+        })
+        
+        wandb.log(epoch_log_dict)
+        
+        # ====================================================================
+        # Save Checkpoint
+        # ====================================================================
         if (epoch + 1) % args.save_every == 0 or (epoch + 1) == args.epochs:
-            checkpoint_path = os.path.join(args.output_dir, "checkpoint_latest.pth")
+            checkpoint_path = output_dir / f"checkpoint_epoch_{epoch+1}.pth"
+            save_checkpoint(
+                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, checkpoint_path
+            )
+            print(colored(f"✓ Checkpoint saved: {checkpoint_path}", "yellow"))
             
-            torch.save({
-                'epoch': epoch + 1, 
-                'mlp_projector_state_dict': model.mlp_projector.state_dict(),
-                'vision_tower_state_dict': model.vision_tower.state_dict(),
-                'language_model_state_dict': model.language_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss_history': loss_history,
-                'wandb_run_id': wandb_run_id,
-                'run_name': args.run_name,
-                'args': args 
-            }, checkpoint_path)
+            # Log checkpoint to WandB
+            wandb.save(str(checkpoint_path), policy="now")
             
-            print(colored(f"Resumable checkpoint saved: {checkpoint_path}", "yellow"))
-            wandb.save(checkpoint_path, policy="now")
-
-    print(colored("Training finished successfully!", "green"))
-
-    model_save_path = os.path.join(args.output_dir, "final_model.pth")
-    torch.save({
-        'model_state_dict': model.mlp_projector.state_dict(),
-        'vision_tower_state_dict': model.vision_tower.state_dict(),
-        'language_model_state_dict': model.language_model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss_history': loss_history,
-        'epochs': args.epochs,
-        'batch_size': args.batch_size,
-        'learning_rate': args.lr,
-        'penalty_weight': args.penalty_weight,
-        'wandb_run_id': wandb_run_id,
-        'run_name': args.run_name,
-        'args': args
-    }, model_save_path)
-    wandb.save(model_save_path)
-    print(colored(f"Full model saved to: {model_save_path}", "green"))
-
+            # Log checkpoint metadata
+            wandb.run.summary[f"checkpoint_epoch_{epoch+1}_loss"] = avg_epoch_loss
+            wandb.run.summary[f"checkpoint_epoch_{epoch+1}_step"] = global_step
+        
+        # ====================================================================
+        # Save Best Model
+        # ====================================================================
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
+            best_checkpoint_path = output_dir / "best_checkpoint.pth"
+            save_checkpoint(
+                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, best_checkpoint_path
+            )
+            print(colored(f"✓ New best model! Loss: {best_loss:.4f}", "green"))
+            
+            # Log to WandB
+            wandb.run.summary["best_loss"] = best_loss
+            wandb.run.summary["best_epoch"] = epoch + 1
+        
+        print()
+    
+    # ========================================================================
+    # Training Complete
+    # ========================================================================
+    print("="*70)
+    print("Training Complete!")
+    print("="*70)
+    print(f"Best loss: {best_loss:.4f}")
+    print(f"Final loss: {loss_history[-1]:.4f}")
+    print(f"Checkpoints saved to: {output_dir}")
+    print("="*70 + "\n")
+    
+    # Save final checkpoint
+    final_ckpt_path = output_dir / "final_checkpoint.pth"
+    save_checkpoint(
+        model, optimizer, scheduler, args.epochs, global_step, loss_history[-1], final_ckpt_path
+    )
+    
+    # ========================================================================
+    # Final WandB Summary
+    # ========================================================================
+    wandb.save(str(final_ckpt_path))
+    
+    # Log final summary statistics
+    wandb.run.summary.update({
+        "final_loss": loss_history[-1],
+        "best_loss": best_loss,
+        "total_epochs": args.epochs,
+        "total_steps": global_step,
+        "training_complete": True,
+    })
+    
+    # ========================================================================
+    # Plot Loss Curve
+    # ========================================================================
     try:
         plt.style.use('seaborn-v0_8')
-    except:
-        plt.style.use('ggplot')
-
+    except Exception:
+        pass
+    
+    import matplotlib
+    matplotlib.use("Agg")
+    
     fig, ax = plt.subplots(figsize=(12, 8))
-    ax.plot(loss_history, linewidth=3, color='#2E86AB', alpha=0.8, marker='o', markersize=4)
+    ax.plot(loss_history, linewidth=3, alpha=0.8, marker='o', markersize=4, label='Training Loss')
+    
+    # Smooth curve
     if len(loss_history) > 5:
-        try:
-            x_smooth = np.linspace(0, len(loss_history)-1, len(loss_history)*3)
-            f = interpolate.interp1d(range(len(loss_history)), loss_history, kind='cubic')
-            y_smooth = f(x_smooth)
-            ax.plot(x_smooth, y_smooth, '--', color='#A23B72', alpha=0.6, linewidth=2, label='Smoothed Trend')
-        except Exception:
-            pass
-
+        x_smooth = np.linspace(0, len(loss_history)-1, len(loss_history)*3)
+        f = interpolate.interp1d(range(len(loss_history)), loss_history, kind='cubic')
+        y_smooth = f(x_smooth)
+        ax.plot(x_smooth, y_smooth, '--', alpha=0.6, linewidth=2, label='Smoothed Trend')
+    
     ax.set_xlabel('Epoch', fontsize=14, fontweight='bold')
     ax.set_ylabel('Average Loss', fontsize=14, fontweight='bold')
     ax.set_title('Training Loss Over Time', fontsize=18, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right', fontsize=12)
     plt.tight_layout()
-
-    plot_png_path = os.path.join(args.output_dir, "loss_history.png")
-    plt.savefig(plot_png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
-    print(colored(f"Loss plot saved to: {plot_png_path}", "cyan"))
-
-    wandb.log({"loss_plot": wandb.Image(plot_png_path)})
+    
+    plot_path = output_dir / "loss_history.png"
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+    print(colored(f"✓ Loss plot saved to: {plot_path}", "cyan"))
+    
+    # Log plot to WandB
+    wandb.log({
+        "charts/loss_history": wandb.Image(str(plot_path))
+    })
+    
+    # ========================================================================
+    # Finish WandB
+    # ========================================================================
+    print("\n✓ WandB logging complete")
     wandb.finish()
+    
+    print("\n" + "="*70)
+    print("All done! 🎉")
+    print("="*70)
 
 if __name__ == "__main__":
     main()
