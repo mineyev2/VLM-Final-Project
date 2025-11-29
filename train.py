@@ -1,6 +1,7 @@
 # PyTorch Files
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Local files
@@ -22,6 +23,7 @@ from datetime import datetime
 import wandb
 import yaml
 from dataclasses import fields
+import logging
 
 def custom_collate_fn(batch):
     """
@@ -45,9 +47,27 @@ def load_yaml_config(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+def count_trainable_params(model):
+    """Count and log trainable parameters."""
+    trainable_params = sum(p.numel() for p in model.get_trainable_parameters())
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    logging.info(
+        f"Trainable: {trainable_params:,} / {total_params:,} "
+        f"({100 * trainable_params / total_params:.2f}%)"
+    )
+    
+    print(colored(
+        f"\nTrainable: {trainable_params:,} / {total_params:,} "
+        f"({100 * trainable_params / total_params:.2f}%)",
+        "magenta"
+    ))
+    
+    return trainable_params, total_params
+
 def main():
-    # ========== Argument Parsing ==========
-    parser = argparse.ArgumentParser(description="Train the QwenCLIPModel on the NuScenes dataset.")
+    # ============================== Argument Parsing ==============================
+    parser = argparse.ArgumentParser(description="Train a model on the NuScenes dataset.")
     
     # Required Args
     # TODO: Make this use ablation number (1a, 2a, etc.)
@@ -85,7 +105,10 @@ def main():
     args = TrainingArgs()
 
     # 2) Override config class with YAML config
-    yaml_path = f"training_configs/{terminal_args.ablation}.yaml"
+    if "lidar" in terminal_args.ablation:
+        yaml_path = f"training_configs/{terminal_args.ablation.replace('-lidar', '')}.yaml"
+    else:
+        yaml_path = f"training_configs/{terminal_args.ablation}.yaml"
     with open(yaml_path, "r") as f:
         yaml_config = yaml.safe_load(f)
 
@@ -100,22 +123,16 @@ def main():
         if value is not None:
             setattr(args, key, value)
 
-    # # 4) Print arguments
-    # print(colored("--- Final Training Configuration ---", "cyan"))
-    # for k, v in vars(args).items():
-    #     print(f"{k}: {v}")
-    # print(colored("--------------------------", "cyan"))
-
-    # =========== Setup ==========
+    # ============================== Setup ==============================
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         torch.cuda.empty_cache()
         gc.collect()
 
     if "lidar" in args.ablation:
-        model = LidarEMMA(device, llm=args.llm)
+        model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
     else:
-        model = QwenCLIPModel(device, llm=args.llm)
+        model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
     
     dataset = NuScenesDataset(
         version=args.version,
@@ -128,15 +145,20 @@ def main():
     # pad_id = model.tokenizer.pad_token_id
     
     dataloader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size, 
+        dataset,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers, 
         collate_fn=custom_collate_fn
     )
 
     # TODO: Make this variable as well
-    optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
+    # optimizer = torch.optim.Adam(model.mlp_projector.parameters(), lr=args.lr)
+    optimizer = optim.AdamW(
+        model.get_trainable_parameters(),
+        lr=args.lr
+        # weight_decay=args.weight_decay # TODO: include back if needed
+    )
 
     start_epoch = 0
     loss_history = []
@@ -166,14 +188,15 @@ def main():
             date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
             args.run_name = f"{date_str}-epochs{args.epochs}"
 
-    if args.freeze_encoder:
-        model.freeze_encoder()
-    else:
-        optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
-    if args.freeze_lang_model:
-        model.language_model.requires_grad_(False)
-    else:
-        optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
+    # if args.freeze_encoder: # Removed, assuming get_trainable_parameters() handles this
+    #     # For QwenCLIP: Freeze vision tower. For LidarEMMA: Freeze both encoders.
+    #     model.freeze_encoder()
+    # else:
+    #     optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
+    # if args.freeze_lang_model:
+    #     model.language_model.requires_grad_(False)
+    # else:
+    #     optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
 
     if checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -197,17 +220,51 @@ def main():
         wandb_run_id = wandb.run.id
 
     print(colored("--- Training Configuration ---", "cyan"))
+    if "lidar" in args.ablation:
+        print(colored("Using LidarEMMA model!", "green"))
+    else:
+        print(colored("Using QwenCLIP model!", "green"))
     for k, v in vars(args).items():
-        print(f"{k}: {v}")
+        print(colored(f"{k}: {v}", "cyan"))
     print(colored("--------------------------", "cyan"))
+
+    # ========================================================================
+    # Log Parameter Count
+    # ========================================================================
+    trainable_params, total_params = count_trainable_params(model)
+
+    wandb.config.update({
+        "trainable_params": trainable_params,
+        "total_params": total_params,
+        "trainable_percentage": 100 * trainable_params / total_params
+    })
     
-    # =========== Training Loop ==========
+    # ========================================================================
+    # Training Loop
+    # ========================================================================
+    print("\n" + "="*70)
+    print("Starting Training")
+    print("="*70 + "\n")
+
+
+    # model.mlp_projector.train()
+    # if not args.freeze_encoder:
+    #     model.vision_tower.train()
+    # if not args.freeze_lang_model:
+    #     model.language_model.train()
+
+    model.train() # Setup model to training mode, according to what should be frozen/unfrozen
+
+
     for epoch in range(start_epoch, args.epochs):
-        model.mlp_projector.train()
-        if not args.freeze_encoder:
-            model.vision_tower.train()
-        if not args.freeze_lang_model:
-            model.language_model.train()
+
+        print("\n=== Trainable Parameters in for loop (sanity check) ===")
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                print(f"✓ {name}: {param.numel():,} params")
+            else:
+                print(f"✗ {name}: {param.numel():,} params (frozen)")
+        print("=" * 50 + "\n")
 
         total_loss = 0.0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
@@ -222,7 +279,7 @@ def main():
             optimizer.zero_grad()
 
             outputs = model(
-                images=image_inputs['pixel_values'], 
+                images=image_inputs['pixel_values'],
                 input_ids=input_ids, 
                 labels=labels
             )

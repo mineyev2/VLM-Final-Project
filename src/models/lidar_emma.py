@@ -10,6 +10,8 @@ from src.models.base_model import BaseModel
 # Import the SST encoder wrapper (OpenMMLab v2 compatible)
 from .sst import LidarEncoderSST
 
+project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
 
 class LidarEMMA(BaseModel):
     """
@@ -26,7 +28,7 @@ class LidarEMMA(BaseModel):
         device,
         llm=None,
         clip_model_name="openai/clip-vit-large-patch14",
-        lidarclip_config_path="./lidarclip/model/mmdet3d/configs/sst_encoder_only_config.py",
+        lidarclip_config_path="src/models/mmdet3d/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,
         freeze_encoders=True,
         freeze_llm=True,
@@ -57,6 +59,7 @@ class LidarEMMA(BaseModel):
         print("\n[2/4] Loading LiDAR encoder (SST)...")
         try:
             # Verify config path exists
+            lidarclip_config_path = os.path.join(project_dir, lidarclip_config_path)
             if isinstance(lidarclip_config_path, str) and not os.path.isfile(lidarclip_config_path):
                 print(f"      Warning: Config path does not exist: {lidarclip_config_path}")
                 print(f"      Will attempt to load anyway (may fail if path is required)...")
@@ -101,7 +104,7 @@ class LidarEMMA(BaseModel):
         lidar_output_size = clip_hidden_size  # By construction: SST -> AttentionPool -> CLIP-dim
 
         # ================================
-        # 4) Projectors (to Qwen hidden)
+        # 4) Projectors
         # ================================
         print("\n[4/4] Setting up projection layers...")
         try:
@@ -133,15 +136,18 @@ class LidarEMMA(BaseModel):
         # ================================
         # 5) Freezing strategy
         # ================================
+        self.freeze_encoders = freeze_encoders
+        self.freeze_llm = freeze_llm
+
         print("\n[Freezing] Applying freeze strategy...")
-        if freeze_encoders:
+        if self.freeze_encoders:
             print("      Freezing vision and LiDAR encoders")
             self.vision_tower.requires_grad_(False)
             self.lidar_encoder.requires_grad_(False)
         else:
             print("      Vision and LiDAR encoders are TRAINABLE")
 
-        if freeze_llm:
+        if self.freeze_llm:
             print("      Freezing language model")
             self.language_model.requires_grad_(False)
         else:
@@ -168,6 +174,20 @@ class LidarEMMA(BaseModel):
         )
 
     # =========================================================================
+
+    def train(self):
+        """
+        Override train to set each component's training mode correctly.
+        """
+        # super().train(mode)
+        self.vision_projector.train()
+        self.lidar_projector.train()
+        
+        if not self.freeze_encoders:
+            self.vision_tower.train()
+            self.lidar_encoder.train()
+        if not self.freeze_llm:
+            self.language_model.train()
 
     def forward(
         self,
@@ -289,8 +309,6 @@ class LidarEMMA(BaseModel):
         text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
         combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
 
-        
-
         # Create attention mask for image embeddings (all real)
         image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
         # Combine with text attention mask
@@ -316,6 +334,14 @@ class LidarEMMA(BaseModel):
 
     # =========================================================================
 
+    def _load_checkpoint_weights(self, checkpoint_data):
+        pass # Implement later if needed
+
+    def generateMotion(self, images, lidar, ego_pos_global):
+        pixel_values = self.image_processor(images=images, return_tensors='pt').pixel_values.to(self.device)
+        _, gen_text = self.generate_trajectory(pixel_values, lidar, ego_pos_global)
+        return gen_text
+    
     def prepare_inputs(
         self,
         images,
@@ -357,15 +383,6 @@ class LidarEMMA(BaseModel):
         prepared['use_vision'] = use_vision
         prepared['use_lidar'] = use_lidar
         return prepared
-
-    # =========================================================================
-
-    def freeze_encoder(self):
-        """
-        Freeze both the vision and LiDAR encoders.
-        """
-        
-        raise NotImplementedError("freeze_encoder method not implemented yet.")
 
     # =========================================================================
 

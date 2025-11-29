@@ -34,10 +34,9 @@ class BaseModel(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def freeze_encoder(self):
-        """
-        For QwenCLIP: Freeze the vision tower (CLIP) parameters.
-        For LidarEMMA: Freeze both the vision and lidar encoders.
-        """
+    def get_trainable_parameters(self):
+        pass
 
+    @abstractmethod
+    def train(self):
         pass

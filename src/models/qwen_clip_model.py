@@ -6,7 +6,7 @@ from src.models.base_model import BaseModel
 
 class QwenCLIPModel(BaseModel):
 
-    def __init__(self, device, llm=None, clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None):
+    def __init__(self, device, llm=None, clip_model_name="openai/clip-vit-large-patch14", checkpoint_path=None, freeze_encoder=False, freeze_llm=False):
         super().__init__()
 
         if llm is None or "Qwen2.5" not in llm:
@@ -22,10 +22,16 @@ class QwenCLIPModel(BaseModel):
             checkpoint_data = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
             print(colored("✓ Checkpoint loaded", "green"))
 
+        # ================================
+        # 1) Vision Encoder (CLIP)
+        # ================================
         print("Loading CLIP vision model...")
         self.vision_tower = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
         self.image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
 
+        # ================================
+        # 2) Language Model (Qwen)
+        # ================================
         print(f"Loading Qwen language model: {llm}...")
         self.llm = llm
         
@@ -44,6 +50,9 @@ class QwenCLIPModel(BaseModel):
         clip_hidden_size = self.vision_tower.config.hidden_size
         qwen_hidden_size = self.language_model.config.hidden_size
         
+        # ================================
+        # 3) Projector
+        # ================================
         self.mlp_projector = nn.Sequential(
             nn.Linear(clip_hidden_size, qwen_hidden_size * 4),
             nn.GELU(),
@@ -52,16 +61,47 @@ class QwenCLIPModel(BaseModel):
             nn.Linear(qwen_hidden_size * 4, qwen_hidden_size),
         ).to(self.device).to(torch.bfloat16)
 
+        # ================================
+        # 5) Freezing strategy
+        # ================================
+        self.freeze_encoder = freeze_encoder
+        self.freeze_llm = freeze_llm
+
+        if self.freeze_encoder:
+            print(colored("Freezing vision encoder parameters.", "yellow"))
+            self.vision_tower.requires_grad_(False)
+        else:
+            print(colored("Vision encoder parameters are TRAINABLE.", "yellow"))
+
+        if self.freeze_llm:
+            print(colored("Freezing language model parameters.", "yellow"))
+            self.language_model.requires_grad_(False)
+        else:
+            print(colored("Language model parameters are TRAINABLE.", "yellow"))
+
+
+        # ================================
+        # 6) Load Checkpoint Weights
+        # ================================
         if checkpoint_data is not None:
             print("Loading checkpoint weights into model components...")
             self._load_checkpoint_weights(checkpoint_data)
 
-    def freeze_encoder(self):
-        """
-        Freeze the vision tower (CLIP) parameters.
-        """
-        self.vision_tower.requires_grad_(False)
+        print(f"\n{'='*70}")
+        print("Model initialization complete!")
+        print(f"{'='*70}\n")
 
+    def train(self):
+        """
+        Override train to set each component's training mode correctly.
+        """
+        # super().train(mode)
+        self.mlp_projector.train()
+        if not self.freeze_encoder:
+            self.vision_tower.train()
+        if not self.freeze_llm:
+            self.language_model.train()
+    
     def forward(self, images, input_ids, labels=None):
         """
         FOR TRAINING:
@@ -155,7 +195,17 @@ class QwenCLIPModel(BaseModel):
         pixel_values = self.image_processor(images=images, return_tensors='pt').pixel_values.to(self.device)
         _, gen_text = self.generate_trajectory(pixel_values, ego_pos_global)
         return gen_text
+    
+    def get_trainable_parameters(self):
+        params = []
+        params.extend(self.mlp_projector.parameters())
 
+        if self.vision_tower.training:
+            params.extend(self.vision_tower.parameters())
+        if self.language_model.training:
+            params.extend(self.language_model.parameters())
+
+        return list(params)
 
     def _load_checkpoint_weights(self, checkpoint_data):
         """Load weights from checkpoint dict into model components."""

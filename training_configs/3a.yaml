@@ -4,7 +4,7 @@ freeze_encoder: false
 freeze_lang_model: false
 epochs: 100
 batch_size: 8
-run_name: "experiment_1"
+run_name: None
 save_every: 10
 wandb_project: "vlm-training"
 resume_from_checkpoint: null
