@@ -194,6 +194,7 @@ class LidarEMMA(BaseModel):
         images=None,
         point_clouds=None,
         input_ids=None,
+        labels=None,
         use_vision=True,
         use_lidar=True,
         return_features=False,
@@ -268,10 +269,30 @@ class LidarEMMA(BaseModel):
         else:
             combined_embeddings = text_embeddings  # [B, L, H]
 
+        # ----- Labels for Loss Computation -----
+        if labels is not None:
+            # Create filler for multimodal tokens (ignore index -100)
+            multimodal_len = projected_vision.shape[1] + projected_lidar.shape[1]
+            batch_size = labels.shape[0]
+
+            if multimodal_len > 0:
+                filler = torch.full(
+                    (batch_size, multimodal_len),
+                    -100,
+                    dtype=labels.dtype,
+                    device=self.device,
+                )
+                combined_labels = torch.cat([filler, labels.to(self.device)], dim=1)
+            else:
+                combined_labels = labels.to(self.device)
+        else:
+            combined_labels = None
+
         outputs = self.language_model(
             inputs_embeds=combined_embeddings,
-            use_cache=False,
-            return_dict=True,
+            use_cache=False, # TODO: What is this?
+            labels=combined_labels,
+            return_dict=True, # TODO: What is this?
         )
 
         if return_features:
