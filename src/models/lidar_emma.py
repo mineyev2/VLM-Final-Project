@@ -32,10 +32,12 @@ class LidarEMMA(BaseModel):
         lidarclip_checkpoint_path=None,
         freeze_encoders=True,
         freeze_llm=True,
+        use_lidar=False
     ):
         super().__init__()
 
         self.device = device
+        self.use_lidar = use_lidar
         print(f"\n{'='*70}")
         print(f"Initializing LidarEMMA on device: {self.device}")
         print(f"{'='*70}\n")
@@ -57,32 +59,36 @@ class LidarEMMA(BaseModel):
         # 2) LiDAR Encoder (SST wrapper)
         # ================================
         print("\n[2/4] Loading LiDAR encoder (SST)...")
-        try:
-            # Verify config path exists
-            lidarclip_config_path = os.path.join(project_dir, lidarclip_config_path)
-            if isinstance(lidarclip_config_path, str) and not os.path.isfile(lidarclip_config_path):
-                print(f"      Warning: Config path does not exist: {lidarclip_config_path}")
-                print(f"      Will attempt to load anyway (may fail if path is required)...")
-            
-            self.lidar_encoder = LidarEncoderSST(
-                sst_config=lidarclip_config_path,
-                clip_embedding_dim=clip_hidden_size,
-                checkpoint=lidarclip_checkpoint_path,
-            ).to(self.device)
-            print(f"      ✓ SST encoder loaded successfully")
-        except KeyError as e:
-            print(f"      ✗ Model registration error in SST:")
-            print(f"         {e}")
-            print(f"\n      Troubleshooting:")
-            print(f"      • Check that mmdet3d >= 1.0 is installed")
-            print(f"      • Ensure SST model is in your mmdet3d installation")
-            print(f"      • Verify config file: {lidarclip_config_path}")
-            raise
-        except Exception as e:
-            print(f"      ✗ Failed to load SST encoder: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+        if self.use_lidar:
+            try:
+                # Verify config path exists
+                lidarclip_config_path = os.path.join(project_dir, lidarclip_config_path)
+                if isinstance(lidarclip_config_path, str) and not os.path.isfile(lidarclip_config_path):
+                    print(f"      Warning: Config path does not exist: {lidarclip_config_path}")
+                    print(f"      Will attempt to load anyway (may fail if path is required)...")
+                
+                self.lidar_encoder = LidarEncoderSST(
+                    sst_config=lidarclip_config_path,
+                    clip_embedding_dim=clip_hidden_size,
+                    checkpoint=lidarclip_checkpoint_path,
+                ).to(self.device)
+                print(f"      ✓ SST encoder loaded successfully")
+            except KeyError as e:
+                print(f"      ✗ Model registration error in SST:")
+                print(f"         {e}")
+                print(f"\n      Troubleshooting:")
+                print(f"      • Check that mmdet3d >= 1.0 is installed")
+                print(f"      • Ensure SST model is in your mmdet3d installation")
+                print(f"      • Verify config file: {lidarclip_config_path}")
+                raise
+            except Exception as e:
+                print(f"      ✗ Failed to load SST encoder: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        else:
+            print(colored("      Skipping LiDAR encoder setup (use_lidar=False)", "yellow"))
+            self.lidar_encoder = None # TODO: Necessary?
 
         # ================================
         # 3) Language Model (Qwen)
@@ -92,7 +98,7 @@ class LidarEMMA(BaseModel):
             self.language_model = AutoModelForCausalLM.from_pretrained(
                 llm,
                 torch_dtype=torch.bfloat16,
-                device_map="auto",
+                device_map="auto"
             )
             self.tokenizer = AutoTokenizer.from_pretrained(llm)
             qwen_hidden_size = self.language_model.config.hidden_size
@@ -118,19 +124,25 @@ class LidarEMMA(BaseModel):
                 nn.Linear(proj_w, qwen_hidden_size),
             ).to(self.device).to(self.language_model.dtype)
 
-            self.lidar_projector = nn.Sequential(
-                nn.Linear(lidar_output_size, proj_w),
-                nn.GELU(),
-                nn.Linear(proj_w, proj_w),
-                nn.GELU(),
-                nn.Linear(proj_w, qwen_hidden_size),
-            ).to(self.device).to(self.language_model.dtype)
+            if self.use_lidar:
+                self.lidar_projector = nn.Sequential(
+                    nn.Linear(lidar_output_size, proj_w),
+                    nn.GELU(),
+                    nn.Linear(proj_w, proj_w),
+                    nn.GELU(),
+                    nn.Linear(proj_w, qwen_hidden_size),
+                ).to(self.device).to(self.language_model.dtype)
             
-            print(f"      ✓ Projectors initialized")
+            print(f"      ✓ Projector(s) initialized")
             print(f"        Vision: {clip_hidden_size} → {proj_w} → {qwen_hidden_size}")
-            print(f"        LiDAR:  {lidar_output_size} → {proj_w} → {qwen_hidden_size}")
+            if self.use_lidar:
+                print(f"        LiDAR:  {lidar_output_size} → {proj_w} → {qwen_hidden_size}")
+            else:
+                print(colored("        Skipping LiDAR projector setup (use_lidar=False)", "yellow"))
+                self.lidar_projector = None # TODO: Necessary?
+        
         except Exception as e:
-            print(f"      ✗ Failed to setup projectors: {e}")
+            print(f"      ✗ Failed to setup projector(s): {e}")
             raise
 
         # ================================
@@ -143,7 +155,8 @@ class LidarEMMA(BaseModel):
         if self.freeze_encoders:
             print("      Freezing vision and LiDAR encoders")
             self.vision_tower.requires_grad_(False)
-            self.lidar_encoder.requires_grad_(False)
+            if self.use_lidar:
+                self.lidar_encoder.requires_grad_(False)
         else:
             print("      Vision and LiDAR encoders are TRAINABLE")
 
@@ -157,37 +170,38 @@ class LidarEMMA(BaseModel):
         print("Model initialization complete!")
         print(f"{'='*70}\n")
 
-        # ================================
-        # 6) Prompt template
-        # ================================
-        self.vision_token = "<vision>"
-        self.lidar_token = "<lidar>"
-        self.prompt_template = (
-            "You are a self-driving car. "
-            "Visual input: {vision_token}. "
-            "LiDAR input: {lidar_token}. "
-            "Your task is to predict the future trajectory based on the camera image, "
-            "LiDAR point cloud, and your recent movement. "
-            "Your last three recorded positions (x, y) are: {positions}. "
-            "Output exactly 10 waypoints formatted as: "
-            "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
-        )
+        # # ================================
+        # # 6) Prompt template
+        # # ================================
+        # self.vision_token = "<vision>"
+        # self.lidar_token = "<lidar>"
+        # self.prompt_template = (
+        #     "You are a self-driving car. "
+        #     "Visual input: {vision_token}. "
+        #     "LiDAR input: {lidar_token}. "
+        #     "Your task is to predict the future trajectory based on the camera image, "
+        #     "LiDAR point cloud, and your recent movement. "
+        #     "Your last three recorded positions (x, y) are: {positions}. "
+        #     "Output exactly 10 waypoints formatted as: "
+        #     "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
+        # )
 
     # =========================================================================
 
-    def train(self):
-        """
-        Override train to set each component's training mode correctly.
-        """
-        # super().train(mode)
-        self.vision_projector.train()
-        self.lidar_projector.train()
+    def train(self, mode=True):
+        """Override train to handle freezing of components."""
+
+        super().train(mode)  # Call parent to properly set training mode
         
-        if not self.freeze_encoders:
-            self.vision_tower.train()
-            self.lidar_encoder.train()
-        if not self.freeze_llm:
-            self.language_model.train()
+        # Then override specific components if frozen
+        if mode and self.freeze_encoders:
+            self.vision_tower.eval()
+            if self.use_lidar:
+                self.lidar_encoder.eval()
+        if mode and self.freeze_llm:
+            self.language_model.eval()
+        
+        return self
 
     def forward(
         self,
@@ -195,8 +209,6 @@ class LidarEMMA(BaseModel):
         point_clouds=None,
         input_ids=None,
         labels=None,
-        use_vision=True,
-        use_lidar=True,
         return_features=False,
     ):
         """
@@ -206,8 +218,6 @@ class LidarEMMA(BaseModel):
             images: [B, 3, H, W] preprocessed tensor (optional)
             point_clouds: list of length B, each (N_i, 4) tensor (optional)
             input_ids: [B, L] token ids (required)
-            use_vision: bool, whether to include vision features
-            use_lidar: bool, whether to include LiDAR features
             return_features: bool, if True return feature dict alongside logits
             
         Returns:
@@ -221,9 +231,10 @@ class LidarEMMA(BaseModel):
         dtype = self.language_model.dtype
         features_dict = {}
         multimodal_embeddings = []
+        multimodal_len = 0
 
         # -------- Vision --------
-        if use_vision and images is not None:
+        if images is not None:
             with torch.no_grad() if not self.vision_tower.training else torch.enable_grad():
                 vision_outputs = self.vision_tower(pixel_values=images.to(self.device))
                 vision_features = vision_outputs.last_hidden_state  # [B, P, C]
@@ -231,32 +242,36 @@ class LidarEMMA(BaseModel):
             # Project to Qwen hidden (keep sequence dim)
             projected_vision = self.vision_projector(vision_features.to(dtype))
             multimodal_embeddings.append(projected_vision)
+            multimodal_len += projected_vision.shape[1]
 
             if return_features:
                 features_dict['vision'] = vision_features.mean(dim=1).to(dtype)
+        else:
+            raise ValueError("Image input is required for vision encoder.")
 
         # -------- LiDAR ---------
-        if use_lidar and point_clouds is not None:
+        if self.use_lidar and point_clouds is not None:
             with torch.no_grad() if not self.lidar_encoder.training else torch.enable_grad():
                 if return_features:
                     lidar_features, attn_weights = self.lidar_encoder(
                         point_clouds, return_attention=True
                     )
                 else:
-                    lidar_features = self.lidar_encoder(point_clouds)  # (B, D)
+                    lidar_features = self.lidar_encoder(point_clouds) # TODO: Enable no pooling?
                     attn_weights = None
 
             # Match sequence shape: add single "token" for LiDAR
             lidar_features = lidar_features.unsqueeze(1)  # [B, 1, D]
             projected_lidar = self.lidar_projector(lidar_features.to(dtype))
             multimodal_embeddings.append(projected_lidar)
+            multimodal_len += projected_lidar.shape[1]
 
             if return_features:
                 features_dict['lidar'] = lidar_features.squeeze(1).to(dtype)
                 if attn_weights is not None:
                     features_dict['lidar_attention'] = attn_weights
-        else:
-            print(colored("Warning: No LiDAR input provided to forward()", "yellow"))
+        elif self.use_lidar:
+            raise ValueError("LiDAR input is required for LiDAR encoder.")
 
         # -------- Text ----------
         if input_ids is None:
@@ -274,7 +289,6 @@ class LidarEMMA(BaseModel):
         # ----- Labels for Loss Computation -----
         if labels is not None:
             # Create filler for multimodal tokens (ignore index -100)
-            multimodal_len = projected_vision.shape[1] + projected_lidar.shape[1]
             batch_size = labels.shape[0]
 
             if multimodal_len > 0:
@@ -365,47 +379,47 @@ class LidarEMMA(BaseModel):
         _, gen_text = self.generate_trajectory(pixel_values, lidar, ego_pos_global)
         return gen_text
     
-    def prepare_inputs(
-        self,
-        images,
-        point_clouds,
-        ego_positions,
-        use_vision=True,
-        use_lidar=True,
-    ):
-        """
-        Prepare & move inputs to device.
+    # def prepare_inputs(
+    #     self,
+    #     images,
+    #     point_clouds,
+    #     ego_positions,
+    #     use_vision=True,
+    #     use_lidar=True,
+    # ):
+    #     """
+    #     Prepare & move inputs to device.
         
-        Returns:
-            dict with keys: 'images', 'point_clouds', 'input_ids', 'use_vision', 'use_lidar'
-        """
-        prepared = {}
+    #     Returns:
+    #         dict with keys: 'images', 'point_clouds', 'input_ids', 'use_vision', 'use_lidar'
+    #     """
+    #     prepared = {}
 
-        # Vision
-        if use_vision and images is not None:
-            if not torch.is_tensor(images):
-                image_inputs = self.image_processor(images=images, return_tensors="pt")
-                prepared['images'] = image_inputs['pixel_values'].to(self.device)
-            else:
-                prepared['images'] = images.to(self.device)
+    #     # Vision
+    #     if use_vision and images is not None:
+    #         if not torch.is_tensor(images):
+    #             image_inputs = self.image_processor(images=images, return_tensors="pt")
+    #             prepared['images'] = image_inputs['pixel_values'].to(self.device)
+    #         else:
+    #             prepared['images'] = images.to(self.device)
 
-        # LiDAR
-        if use_lidar and point_clouds is not None:
-            prepared['point_clouds'] = [pc.to(self.device) for pc in point_clouds]
+    #     # LiDAR
+    #     if use_lidar and point_clouds is not None:
+    #         prepared['point_clouds'] = [pc.to(self.device) for pc in point_clouds]
 
-        # Prompt
-        positions_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_positions])
-        prompt = self.prompt_template.format(
-            vision_token=self.vision_token if use_vision else "not available",
-            lidar_token=self.lidar_token if use_lidar else "not available",
-            positions=positions_str,
-        )
-        text_inputs = self.tokenizer(prompt, return_tensors="pt")
-        prepared['input_ids'] = text_inputs['input_ids'].to(self.device)
+    #     # Prompt
+    #     positions_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in ego_positions])
+    #     prompt = self.prompt_template.format(
+    #         vision_token=self.vision_token if use_vision else "not available",
+    #         lidar_token=self.lidar_token if use_lidar else "not available",
+    #         positions=positions_str,
+    #     )
+    #     text_inputs = self.tokenizer(prompt, return_tensors="pt")
+    #     prepared['input_ids'] = text_inputs['input_ids'].to(self.device)
 
-        prepared['use_vision'] = use_vision
-        prepared['use_lidar'] = use_lidar
-        return prepared
+    #     prepared['use_vision'] = use_vision
+    #     prepared['use_lidar'] = use_lidar
+    #     return prepared
 
     # =========================================================================
 
@@ -413,78 +427,42 @@ class LidarEMMA(BaseModel):
         """Return list of parameters to optimize."""
         params = []
         params.extend(self.vision_projector.parameters())
-        params.extend(self.lidar_projector.parameters())
 
-        if self.vision_tower.training:
+        if self.use_lidar:
+            params.extend(self.lidar_projector.parameters())
+
+        if not self.freeze_encoders:
             params.extend(self.vision_tower.parameters())
-        if self.lidar_encoder.training:
-            params.extend(self.lidar_encoder.parameters())
-        if self.language_model.training:
+            if self.use_lidar:
+                params.extend(self.lidar_encoder.parameters())
+        if not self.freeze_llm:
             params.extend(self.language_model.parameters())
+        
         return list(params)
 
     def save_projectors(self, save_path):
         """Save projection layer weights."""
-        torch.save(
-            {
-                'vision_projector': self.vision_projector.state_dict(),
-                'lidar_projector': self.lidar_projector.state_dict(),
-            },
-            save_path,
-        )
+        if self.use_lidar:
+            torch.save(
+                {
+                    'vision_projector': self.vision_projector.state_dict(),
+                    'lidar_projector': self.lidar_projector.state_dict(),
+                },
+                save_path,
+            )
+        else:
+            torch.save(
+                {
+                    'vision_projector': self.vision_projector.state_dict(),
+                },
+                save_path,
+            )
         print(f"Saved projectors to {save_path}")
 
     def load_projectors(self, load_path):
         """Load projection layer weights."""
         ckpt = torch.load(load_path, map_location=self.device)
         self.vision_projector.load_state_dict(ckpt['vision_projector'])
-        self.lidar_projector.load_state_dict(ckpt['lidar_projector'])
+        if self.use_lidar:
+            self.lidar_projector.load_state_dict(ckpt['lidar_projector'])
         print(f"Loaded projectors from {load_path}")
-
-
-# ============================================================================
-# Example usage and testing
-# ============================================================================
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    print("Testing LidarEMMA initialization...")
-    print(f"Device: {device}\n")
-    
-    try:
-        model = LidarEMMA(
-            device=device,
-            llm="Qwen/Qwen2.5-3B-Instruct",
-            clip_model_name="openai/clip-vit-large-patch14",
-            lidarclip_config_path="./lidarclip/model/sst_encoder_only_config.py",
-            lidarclip_checkpoint_path=None,
-            freeze_encoders=True,
-            freeze_llm=True,
-        )
-
-        B = 2
-        dummy_images = torch.randn(B, 3, 224, 224).to(device)
-        dummy_point_clouds = [torch.randn(1000, 4).to(device) for _ in range(B)]
-        dummy_positions = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
-
-        print("Preparing inputs...")
-        inputs = model.prepare_inputs(
-            images=dummy_images,
-            point_clouds=dummy_point_clouds,
-            ego_positions=dummy_positions,
-            use_vision=True,
-            use_lidar=True,
-        )
-        
-        print("Running forward pass...")
-        logits, feats = model(return_features=True, **inputs)
-        
-        print(f"\n✓ Forward pass successful!")
-        print(f"  Logits shape: {logits.shape}")
-        print(f"  Vision features shape: {feats['vision'].shape if 'vision' in feats else 'N/A'}")
-        print(f"  LiDAR features shape: {feats['lidar'].shape if 'lidar' in feats else 'N/A'}")
-        
-    except Exception as e:
-        print(f"\n✗ Error: {e}")
-        import traceback
-        traceback.print_exc()

@@ -112,7 +112,7 @@ class NuScenesDataset(Dataset):
             full_text, 
             return_tensors="pt", 
             padding="max_length", 
-            max_length=2048,
+            max_length=512, # Manage carefully. Big number leads to OOM for GPU
             truncation=True
         ).input_ids.squeeze(0)
         

@@ -218,10 +218,13 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
     
-    if args.use_lidar:
-        model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
-    else:
-        model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
+    # if args.use_lidar:
+    #     model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model, use_lidar=args.use_lidar)
+    # else:
+    #     model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
+
+    model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model, use_lidar=args.use_lidar)
+
 
     tokenizer = model.tokenizer
     
@@ -371,27 +374,12 @@ def main():
     print("\n" + "="*70)
     print("Starting Training")
     print("="*70 + "\n")
-
-
-    # model.mlp_projector.train()
-    # if not args.freeze_encoder:
-    #     model.vision_tower.train()
-    # if not args.freeze_lang_model:
-    #     model.language_model.train()
     
     loss_history = []
     best_loss = float('inf')
-    
+    model.train()
+
     for epoch in range(start_epoch, args.epochs):
-        model.train()
-        
-        # Set encoder eval modes if frozen
-        if model.freeze_encoders:
-            model.vision_tower.eval()
-            model.lidar_encoder.eval()
-        if model.freeze_llm:
-            model.language_model.eval()
-        
         total_loss = 0.0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         
@@ -407,7 +395,7 @@ def main():
             
             # Process LiDAR data
             point_clouds = None
-            if lidar_data is not None:
+            if args.use_lidar:
                 point_clouds = [pc for pc in lidar_data if pc is not None]
                 if len(point_clouds) == 0:
                     point_clouds = None
@@ -426,8 +414,6 @@ def main():
                     point_clouds=point_clouds,
                     input_ids=input_ids,
                     labels=labels,
-                    use_vision=True,
-                    use_lidar=(point_clouds is not None)
                 )
                 
                 # # ================================================================

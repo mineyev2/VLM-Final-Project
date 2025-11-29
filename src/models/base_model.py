@@ -38,5 +38,5 @@ class BaseModel(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def train(self):
+    def train(self, mode=True):
         pass
