@@ -105,6 +105,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'loss': loss,
+        'lidar_pooling': model.lidar_pooling,
     }
     
     # Optionally save encoder states if they were trained or they exist
@@ -124,8 +125,22 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
     logging.info(f"Checkpoint saved to {save_path}")
 
 
-def load_checkpoint(model, optimizer, scheduler, checkpoint_path, device):
+def load_checkpoint(args, lr_lambda, checkpoint_path, device):
     """Load checkpoint and resume training."""
+
+    model = LidarEMMA(device,
+                      llm=args.llm,
+                      freeze_encoders=args.freeze_encoder,
+                      freeze_llm=args.freeze_lang_model,
+                      use_lidar=args.use_lidar,
+                      lidar_pooling=args.lidar_pooling)
+    optimizer = optim.AdamW(
+        model.get_trainable_parameters(),
+        lr=args.lr
+        # weight_decay=args.weight_decay # TODO: include back if needed
+    )
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     logging.info(f"Loading checkpoint from {checkpoint_path}...")
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -150,7 +165,7 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path, device):
     
     logging.info(f"✓ Resumed from epoch {epoch}, step {global_step}")
     
-    return epoch, global_step
+    return model, optimizer, scheduler, epoch, global_step
 
 def main():
     # ========================================================================
@@ -179,6 +194,13 @@ def main():
     parser.add_argument("--wandb_project", type=str, required=True, help="WandB project name.") # Pranav's: "vlm-training"
 
     # Optional args
+    parser.add_argument(
+        "--use_lidar_pooling",
+        action="store_true",      # Stores True when flag is used
+        dest="lidar_pooling",      # The variable name in 'args'
+        default=False,              # Default to False (use TokenLearner) if flag is missing
+        help="If set, uses TokenLearner. If omitted, uses standard pooling."
+    )
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training.")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs.")
@@ -225,7 +247,12 @@ def main():
     # else:
     #     model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
 
-    model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model, use_lidar=args.use_lidar)
+    model = LidarEMMA(device,
+                      llm=args.llm,
+                      freeze_encoders=args.freeze_encoder,
+                      freeze_llm=args.freeze_lang_model,
+                      use_lidar=args.use_lidar,
+                      lidar_pooling=args.lidar_pooling)
 
 
     tokenizer = model.tokenizer
