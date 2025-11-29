@@ -102,13 +102,12 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
         'epoch': epoch,
         'global_step': global_step,
         'vision_projector_state_dict': model.vision_projector.state_dict(),
-        'lidar_projector_state_dict': model.lidar_projector.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'loss': loss,
     }
     
-    # Optionally save encoder states if they were trained
+    # Optionally save encoder states if they were trained or they exist
     if hasattr(model, "vision_tower") and not model.freeze_encoders:
         checkpoint['vision_encoder_state_dict'] = model.vision_tower.state_dict()
     
@@ -117,6 +116,9 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
     
     if hasattr(model, "language_model") and not model.freeze_llm:
         checkpoint['llm_state_dict'] = model.language_model.state_dict()
+
+    if hasattr(model, "lidar_projector"):
+        checkpoint['lidar_projector_state_dict'] = model.lidar_projector.state_dict()
     
     torch.save(checkpoint, save_path)
     logging.info(f"Checkpoint saved to {save_path}")
@@ -374,7 +376,7 @@ def main():
     print("\n" + "="*70)
     print("Starting Training")
     print("="*70 + "\n")
-    
+
     loss_history = []
     best_loss = float('inf')
     model.train()
