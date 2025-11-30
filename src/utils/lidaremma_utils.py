@@ -2,7 +2,7 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 import re
 
-def collate_fn(batch, tokenizer_pad_id):
+def collate_fn(batch, tokenizer_pad_id, training=True):
     """
     Collate function for batching dataset samples.
     
@@ -17,10 +17,17 @@ def collate_fn(batch, tokenizer_pad_id):
     input_ids = [item.get("input_ids") for item in batch]
     labels = [item.get("labels") for item in batch]
 
-    if "text_attention_mask" in batch[0]:
+    if not training:
         text_attention_masks = [item.get("text_attention_mask") for item in batch]
         text_attention_masks_padded = pad_sequence(text_attention_masks, batch_first=True, padding_value=0)
-        
+
+        # # Load gt_waypoints, ego_positions
+        # gt_waypoints = [item.get("waypoints") for item in batch]
+        # ego_positions = [item.get("ego_positions") for item in batch]
+
+        # convert gt_waypoints and ego_positions to numpy matrix
+        gt_waypoints = [np.array(item.get("waypoints"), dtype=float)[:, :2] for item in batch] # just do x, y coords
+        ego_positions = [np.array(item.get("ego_positions"), dtype=float) for item in batch]
     
     # LiDAR point clouds (list of tensors, variable size)
     lidar_list = [item.get("lidar", item.get("point_cloud", None)) for item in batch]
@@ -29,14 +36,17 @@ def collate_fn(batch, tokenizer_pad_id):
     input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer_pad_id)
     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
     
-    if "text_attention_mask" in batch[0]:
+    if not training:
         return {
             "images": images,
             "input_ids": input_ids_padded,
             "labels": labels_padded,
             "lidar": lidar_list,
             "text_attention_masks": text_attention_masks_padded,
+            "waypoints": gt_waypoints,
+            "ego_positions": ego_positions,
         }
+        
     else:
         return {
             "images": images,

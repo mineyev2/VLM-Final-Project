@@ -84,7 +84,7 @@ def main():
                 freeze_encoders=True,
                 freeze_llm=True,
                 use_lidar=args.use_lidar,
-                lidar_pooling=True) # Always true for now
+                lidar_pooling=False) # Always false for now
     model.eval() # Set to eval mode
     
     tokenizer = model.tokenizer
@@ -103,7 +103,7 @@ def main():
 
     # Create dataloader
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    custom_collate_fn = lambda batch: collate_fn(batch, pad_id)
+    custom_collate_fn = lambda batch: collate_fn(batch, pad_id, training=False)
     
     dataloader = DataLoader(
         ds,
@@ -158,11 +158,13 @@ def main():
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             lidar_data = batch.get("lidar", None) # TODO: Rewrite so it uses device gpu
-            batch_gt_waypoints = [item['waypoints'] for item in batch]
-            batch_ego_positions = [item['ego_positions'] for item in batch]
+            batch_gt_waypoints = batch.get("waypoints", None)
+            batch_ego_positions = batch.get("ego_positions", None)
             text_attention_masks = batch['text_attention_masks'].to(device)
 
-            batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
+            # batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
+            
+            # batch_lidar_device = [pc.to(device) for pc in lidar_data]
 
             # Process images with CLIP processor
             pixel_values = model.image_processor(images=images, return_tensors="pt").pixel_values.to(device)
@@ -179,7 +181,7 @@ def main():
                                     for pc in point_clouds]
                     
             try:
-                outputs, gen_texts = model.generate_trajectory(
+                _, gen_texts = model.generate_trajectory(
                     text_attention_masks,
                     images=pixel_values,
                     point_clouds=point_clouds,
@@ -202,7 +204,7 @@ def main():
                 num_valid_waypoints = pred_coords.shape[0]
                 format_compliant = (num_valid_waypoints == 10)
 
-                history = np.array(batch_ego_positions_py[idx])
+                # history = np.array(batch_ego_positions_py[idx])
 
                 if pred_coords.shape[0] < 10:
                     # pad with NaNs so shapes align
@@ -214,6 +216,8 @@ def main():
 
                 # === Coordinate-based metrics ===
                 gt_wp = batch_gt_waypoints[idx]
+                # print("pred coords shape: ", pred_coords.shape)
+                # print("gt coords shape: ", gt_wp.shape)
                 diffs = pred_coords - gt_wp
                 l2_per_waypoint = np.linalg.norm(diffs, axis=1)
                 
