@@ -209,7 +209,7 @@ class NuScenesDataset(Dataset):
         labels = input_ids.clone()
         
         # Calculate prompt length for masking
-        # Note: We tokenize the prompt separately to find the boundary
+        # NOTE: We tokenize the prompt separately to find the boundary
         prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.squeeze(0)
         prompt_len = prompt_ids.shape[0]
         

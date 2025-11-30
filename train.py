@@ -63,7 +63,7 @@ def collate_fn(batch, tokenizer_pad_id):
     # LiDAR point clouds (list of tensors, variable size)
     lidar_list = [item.get("lidar", item.get("point_cloud", None)) for item in batch]
     
-    # Pad text sequences
+    # Pad text sequences so they are the same length in the batch
     input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer_pad_id)
     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
     
@@ -241,7 +241,7 @@ def main():
 
     # Add date to run_name to keep it unique
     date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-    args.run_name += f"{date_str}
+    args.run_name += f"{date_str}"
 
     # if args.resume_from: # TODO: Add in later
     #     start_epoch, global_step = load_checkpoint(
