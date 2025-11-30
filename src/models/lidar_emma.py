@@ -111,6 +111,8 @@ class LidarEMMA(BaseModel):
                 device_map="auto"
             )
             self.tokenizer = AutoTokenizer.from_pretrained(llm)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
             qwen_hidden_size = self.language_model.config.hidden_size
             print(f"      ✓ Qwen loaded. Hidden size: {qwen_hidden_size}")
         except Exception as e:
@@ -304,11 +306,8 @@ class LidarEMMA(BaseModel):
         # ====================================================================
         # Fuse embeddings
         # ====================================================================
-        if multimodal_embeddings:
-            multimodal_embeds = torch.cat(multimodal_embeddings, dim=1)  # [B, M, H]
-            combined_embeddings = torch.cat([multimodal_embeds, text_embeddings], dim=1)  # [B, M+L, H]
-        else:
-            combined_embeddings = text_embeddings  # [B, L, H]
+        multimodal_embeds = torch.cat(multimodal_embeddings, dim=1)  # [B, M, H]
+        combined_embeddings = torch.cat([multimodal_embeds, text_embeddings], dim=1)  # [B, M+L, H]
 
         # ====================================================================
         # Pad labels for Loss Computation
@@ -432,13 +431,10 @@ class LidarEMMA(BaseModel):
         # ====================================================================
         batch_size = images.shape[0]
         combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
-        # combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
 
-        # print("Batch size:", batch_size)
-        # print("Text attention mask dims: ", text_attention_mask.shape)
-        
-        # print("Multimodal length:", multimodal_len)
-
+        # ====================================================================
+        # Generate attention mask
+        # ====================================================================
         multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
         combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
 
@@ -453,15 +449,15 @@ class LidarEMMA(BaseModel):
             min_new_tokens=50,   # Ensure it generates something substantial
             pad_token_id=self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
-            do_sample=False,     # Greedy decoding for consistency
-            num_beams=5,         # No beam search
-            output_scores=True,
-            return_dict_in_generate=True
+            # do_sample=False,     # Greedy decoding for consistency
+            # num_beams=5,         # No beam search
+            # output_scores=True,
+            # return_dict_in_generate=True
         )
 
         generated_ids = outputs.sequences
         generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        return outputs, generated_texts
+        return generated_texts
 
     # =========================================================================
 

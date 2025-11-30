@@ -102,16 +102,19 @@ def main():
     print(f"✓ Dataset loaded: {len(ds)} samples\n")
 
     # Create dataloader
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    pad_id = tokenizer.pad_token_id
     custom_collate_fn = lambda batch: collate_fn(batch, pad_id, training=False)
     
     dataloader = DataLoader(
         ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False, # Keep order the same for reproducability
         num_workers=args.num_workers,
         collate_fn=custom_collate_fn,
-        pin_memory=True if device.type == "cuda" else False
+        pin_memory=True if device.type == "cuda" else False,
+        drop_last=False, # Don't drop last batch if not full
+        prefetch_factor=2, # Faster data loading by prefetching batches while running model
+        
     )
 
     print(colored("--- Evaluation Configuration ---", "cyan"))
@@ -141,6 +144,21 @@ def main():
         json.dump(args_dict, f, indent=4)
     print(colored(f"Run arguments saved to {args_json_path}", "green"))
     
+    # Load dark scenes information
+    dark_scenes_path = os.path.join(args.output_dir, 'dark_scenes.csv')
+    dark_scenes_data = {'<40': [], '<60': [], '<80': []}
+    
+    if os.path.exists(dark_scenes_path):
+        with open(dark_scenes_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                dark_scenes_data['<40'].append(row['<40'] == 'True')
+                dark_scenes_data['<60'].append(row['<60'] == 'True')
+                dark_scenes_data['<80'].append(row['<80'] == 'True')
+        print(colored(f"Loaded dark scenes data from {dark_scenes_path}", "green"))
+    else:
+        print(colored(f"Warning: {dark_scenes_path} not found. Dark scene filtering disabled.", "yellow"))
+    
     # Open file and keep it open during the loop
     csv_file = open(csv_path, 'w', newline='')
     fieldnames = ['idx', 'num_valid_waypoints', 'format_compliant', 'ade', 'fde',
@@ -149,22 +167,32 @@ def main():
                  ['history_trajectory', 'gt_trajectory', 'pred_trajectory', 'gen_text'] # Added history_trajectory
     writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
     writer.writeheader()
+    
+    # Open separate CSV files for dark scenes
+    csv_files_dark = {}
+    writers_dark = {}
+    for threshold in ['40', '60', '80']:
+        csv_path_dark = os.path.join(args.output_dir, f'eval_results_dark{threshold}.csv')
+        csv_files_dark[threshold] = open(csv_path_dark, 'w', newline='')
+        writers_dark[threshold] = csv.DictWriter(csv_files_dark[threshold], fieldnames=fieldnames)
+        writers_dark[threshold].writeheader()
     # ---------------------------
 
     results = []
+    results_dark = {'40': [], '60': [], '80': []}
+    sample_idx = 0  # Track global sample index across batches
+    
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating", leave=False):
             images = batch['images']  # List of PIL images
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
             lidar_data = batch.get("lidar", None) # TODO: Rewrite so it uses device gpu
+
+            # Extra data loaded for evaluation
             batch_gt_waypoints = batch.get("waypoints", None)
             batch_ego_positions = batch.get("ego_positions", None)
             text_attention_masks = batch['text_attention_masks'].to(device)
-
-            # batch_ego_positions_py = [[[float(x), float(y)] for (x, y) in ego_pos] for ego_pos in batch_ego_positions]
-            
-            # batch_lidar_device = [pc.to(device) for pc in lidar_data]
 
             # Process images with CLIP processor
             pixel_values = model.image_processor(images=images, return_tensors="pt").pixel_values.to(device)
@@ -181,7 +209,7 @@ def main():
                                     for pc in point_clouds]
                     
             try:
-                _, gen_texts = model.generate_trajectory(
+                gen_texts = model.generate_trajectory(
                     text_attention_masks,
                     images=pixel_values,
                     point_clouds=point_clouds,
@@ -204,8 +232,6 @@ def main():
                 num_valid_waypoints = pred_coords.shape[0]
                 format_compliant = (num_valid_waypoints == 10)
 
-                # history = np.array(batch_ego_positions_py[idx])
-
                 if pred_coords.shape[0] < 10:
                     # pad with NaNs so shapes align
                     pad = np.full((10 - pred_coords.shape[0], 2), np.nan)
@@ -216,8 +242,6 @@ def main():
 
                 # === Coordinate-based metrics ===
                 gt_wp = batch_gt_waypoints[idx]
-                # print("pred coords shape: ", pred_coords.shape)
-                # print("gt coords shape: ", gt_wp.shape)
                 diffs = pred_coords - gt_wp
                 l2_per_waypoint = np.linalg.norm(diffs, axis=1)
                 
@@ -225,7 +249,7 @@ def main():
                 ade = np.nanmean(l2_per_waypoint)
                 
                 # FDE (Final Displacement Error)
-                fde = l2_per_waypoint[-1]
+                fde = l2_per_waypoint[-1] if len(l2_per_waypoint) >= 10 else np.nan
                 
                 error_at_1s = l2_per_waypoint[1] if len(l2_per_waypoint) > 1 else np.nan
                 failure_rate = True if (error_at_1s > 10.0 or np.isnan(error_at_1s)) else False 
@@ -259,9 +283,28 @@ def main():
                 # Write to CSV immediately (incremental saving)
                 writer.writerow(result)
                 csv_file.flush()  # Ensure data is written to disk
+                
+                # Write to dark scene CSVs if applicable
+                if len(dark_scenes_data['<40']) > sample_idx:
+                    if dark_scenes_data['<40'][sample_idx]:
+                        results_dark['40'].append(result)
+                        writers_dark['40'].writerow(result)
+                        csv_files_dark['40'].flush()
+                    if dark_scenes_data['<60'][sample_idx]:
+                        results_dark['60'].append(result)
+                        writers_dark['60'].writerow(result)
+                        csv_files_dark['60'].flush()
+                    if dark_scenes_data['<80'][sample_idx]:
+                        results_dark['80'].append(result)
+                        writers_dark['80'].writerow(result)
+                        csv_files_dark['80'].flush()
+                
+                sample_idx += 1
 
     # Close CSV file
     csv_file.close()
+    for threshold in ['40', '60', '80']:
+        csv_files_dark[threshold].close()
 
     # Waypoint-specific errors (only for non-failed samples)
     # Waypoint indices correspond to: 0=0.5s, 1=1s, 2=1.5s, 3=2s, 4=2.5s, 5=3s, etc.
@@ -283,29 +326,61 @@ def main():
     failure_count = sum(1 for r in results if r['failure_rate'])
     failure_rate = failure_count / len(results) if len(results) > 0 else 0.0
     
-    summary = {
-        'total_samples': len(results),
-        'successful_samples': len(successful_samples),
-        'failed_samples': failure_count,
-        'failure_rate': float(failure_rate),
-        'format_compliance_rate': float(format_compliance_rate),
-        'ade_mean': float(np.mean(ades)) if len(ades) > 0 else float('nan'),
-        'ade_std': float(np.std(ades)) if len(ades) > 0 else float('nan'),
-        'fde_mean': float(np.mean(fdes)) if len(fdes) > 0 else float('nan'),
-        'fde_std': float(np.std(fdes)) if len(fdes) > 0 else float('nan'),
-        'error_at_1s_mean': float(np.mean(wp1_errors)) if len(wp1_errors) > 0 else float('nan'),
-        'error_at_1s_std': float(np.std(wp1_errors)) if len(wp1_errors) > 0 else float('nan'),
-        'error_at_2s_mean': float(np.mean(wp3_errors)) if len(wp3_errors) > 0 else float('nan'),
-        'error_at_2s_std': float(np.std(wp3_errors)) if len(wp3_errors) > 0 else float('nan'),
-        'error_at_3s_mean': float(np.mean(wp5_errors)) if len(wp5_errors) > 0 else float('nan'),
-        'error_at_3s_std': float(np.std(wp5_errors)) if len(wp5_errors) > 0 else float('nan'),
-        'avg_processing_time_sec': float(np.mean([r['processing_time_sec'] for r in results])),
-    }
+    def compute_summary(results_list, name=""):
+        """Helper function to compute summary statistics"""
+        successful = [r for r in results_list if not r['failure_rate']]
+        
+        ades_local = [r['ade'] for r in successful if not np.isnan(r['ade'])]
+        fdes_local = [r['fde'] for r in successful if not np.isnan(r['fde'])]
+        
+        wp1_local = [r['wp1_error'] for r in successful if not np.isnan(r['wp1_error'])]
+        wp3_local = [r['wp3_error'] for r in successful if not np.isnan(r['wp3_error'])]
+        wp5_local = [r['wp5_error'] for r in successful if not np.isnan(r['wp5_error'])]
+        
+        format_compliant_local = sum(1 for r in results_list if r['format_compliant'])
+        format_compliance_local = format_compliant_local / len(results_list) if len(results_list) > 0 else 0.0
+        
+        failure_count_local = sum(1 for r in results_list if r['failure_rate'])
+        failure_rate_local = failure_count_local / len(results_list) if len(results_list) > 0 else 0.0
+        
+        return {
+            'category': name,
+            'total_samples': len(results_list),
+            'successful_samples': len(successful),
+            'failed_samples': failure_count_local,
+            'failure_rate': float(failure_rate_local),
+            'format_compliance_rate': float(format_compliance_local),
+            'ade_mean': float(np.mean(ades_local)) if len(ades_local) > 0 else float('nan'),
+            'ade_std': float(np.std(ades_local)) if len(ades_local) > 0 else float('nan'),
+            'fde_mean': float(np.mean(fdes_local)) if len(fdes_local) > 0 else float('nan'),
+            'fde_std': float(np.std(fdes_local)) if len(fdes_local) > 0 else float('nan'),
+            'error_at_1s_mean': float(np.mean(wp1_local)) if len(wp1_local) > 0 else float('nan'),
+            'error_at_1s_std': float(np.std(wp1_local)) if len(wp1_local) > 0 else float('nan'),
+            'error_at_2s_mean': float(np.mean(wp3_local)) if len(wp3_local) > 0 else float('nan'),
+            'error_at_2s_std': float(np.std(wp3_local)) if len(wp3_local) > 0 else float('nan'),
+            'error_at_3s_mean': float(np.mean(wp5_local)) if len(wp5_local) > 0 else float('nan'),
+            'error_at_3s_std': float(np.std(wp5_local)) if len(wp5_local) > 0 else float('nan'),
+        }
+    
+    summary = compute_summary(results, "all_samples")
 
     # Save summary to JSON
     summary_json_path = os.path.join(args.output_dir, 'eval_results_summary.json')
     with open(summary_json_path, 'w') as f:
         json.dump(summary, f, indent=4)
+    
+    # Compute and save summaries for dark scenes
+    summaries_dark = {}
+    for threshold in ['40', '60', '80']:
+        if len(results_dark[threshold]) > 0:
+            summary_dark = compute_summary(results_dark[threshold], f"dark<{threshold}")
+            summaries_dark[threshold] = summary_dark
+            
+            # Save individual summary file
+            summary_dark_path = os.path.join(args.output_dir, f'eval_results_dark{threshold}_summary.json')
+            with open(summary_dark_path, 'w') as f:
+                json.dump(summary_dark, f, indent=4)
+            print(colored(f"Dark{threshold} summary saved to {summary_dark_path}", "green"))
     
     print(colored('\n=== Evaluation Summary ===', 'cyan', attrs=['bold']))
     print(f"Total Samples: {summary['total_samples']}")
@@ -320,6 +395,15 @@ def main():
     print(f"Error @ 3s: {summary['error_at_3s_mean']:.4f} ± {summary['error_at_3s_std']:.4f} m")
     print(colored(f"\nResults saved to {csv_path}", "green"))
     print(colored(f"Summary saved to {summary_json_path}", "green"))
+    
+    # Print dark scene summaries
+    for threshold in ['40', '60', '80']:
+        if threshold in summaries_dark:
+            s = summaries_dark[threshold]
+            print(colored(f'\n=== Dark<{threshold} Summary ({s["total_samples"]} samples) ===', 'yellow', attrs=['bold']))
+            print(f"Successful: {s['successful_samples']} | Failed: {s['failed_samples']} | Failure Rate: {s['failure_rate']:.2%}")
+            print(f"ADE: {s['ade_mean']:.4f} ± {s['ade_std']:.4f} m | FDE: {s['fde_mean']:.4f} ± {s['fde_std']:.4f} m")
+            print(f"Error @ 1s: {s['error_at_1s_mean']:.4f} m | @ 2s: {s['error_at_2s_mean']:.4f} m | @ 3s: {s['error_at_3s_mean']:.4f} m")
 
 if __name__ == "__main__":
     main()

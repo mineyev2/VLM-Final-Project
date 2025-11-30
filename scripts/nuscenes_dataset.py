@@ -208,22 +208,21 @@ class NuScenesDataset(Dataset):
             truncation=True
         )
         input_ids = inputs.input_ids.squeeze(0)
-
-        if self.return_attention_mask:
-            attention_mask = inputs.attention_mask.squeeze(0)
+        attention_mask = inputs.attention_mask.squeeze(0)
         
         labels = input_ids.clone()
         
-        # Calculate prompt length for masking
-        # NOTE: We tokenize the prompt separately to find the boundary
         prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.squeeze(0)
         prompt_len = prompt_ids.shape[0]
-        
+
         # Apply -100 mask to the prompt part (loss is only calculated on target_text)
         if prompt_len < labels.shape[0]:
             labels[:prompt_len] = -100
         else:
             labels[:] = -100 # Safety fallback if truncation cut off the target
+        
+        # Use attention mask to set padding tokens to -100 as well
+        labels[attention_mask == 0] = -100
         
         # Calibration
         cam_calib = self.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])

@@ -273,7 +273,7 @@ def main():
     print(f"✓ Dataset loaded: {len(dataset)} samples\n")
 
     # Create dataloader
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    pad_id = tokenizer.pad_token_id
     custom_collate_fn = lambda batch: collate_fn(batch, pad_id)
     
     dataloader = DataLoader(
