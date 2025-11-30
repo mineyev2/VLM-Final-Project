@@ -240,8 +240,8 @@ def main():
     global_step = 0
 
     # Add date to run_name to keep it unique
-    date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-    args.run_name += f"{date_str}"
+    date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    args.run_name = f"{args.run_name}_{date_str}"
 
     # if args.resume_from: # TODO: Add in later
     #     start_epoch, global_step = load_checkpoint(

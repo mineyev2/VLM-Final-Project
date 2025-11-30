@@ -33,7 +33,7 @@ class BaseModel(nn.Module, ABC):
     def forward(self, images, lidar, ego_pos_global):
         """Standard PyTorch forward pass."""
         pass
-
+    
     @abstractmethod
     def _load_checkpoint_weights(self, checkpoint=None):
         pass
