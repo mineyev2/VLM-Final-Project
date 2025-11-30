@@ -28,7 +28,7 @@ class LidarEMMA(BaseModel):
     def __init__(
         self,
         device,
-        llm=None,
+        llm="Qwen/Qwen2.5-3B",
         clip_model_name="openai/clip-vit-large-patch14",
         lidarclip_config_path="src/models/mmdet3d/configs/sst_encoder_only_config.py",
         lidarclip_checkpoint_path=None,

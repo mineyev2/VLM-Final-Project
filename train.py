@@ -96,7 +96,7 @@ def count_trainable_params(model):
     
     return trainable_params, total_params
 
-def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_path):
+def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_path, use_lidar=False):
     """Save training checkpoint."""
     checkpoint = {
         'epoch': epoch,
@@ -118,7 +118,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, loss, save_
     if hasattr(model, "language_model") and not model.freeze_llm:
         checkpoint['llm_state_dict'] = model.language_model.state_dict()
 
-    if hasattr(model, "lidar_projector"): # Make sure we only run if we are using lidar
+    if use_lidar: # Make sure we only run if we are using lidar
         checkpoint['lidar_projector_state_dict'] = model.lidar_projector.state_dict()
     
     torch.save(checkpoint, save_path)
@@ -236,6 +236,35 @@ def main():
     # ========================================================================
     # Initialize Model, Dataset, Dataloader, Optimizer, Scheduler
     # ========================================================================
+    start_epoch = 0
+    global_step = 0
+
+    # if args.resume_from: # TODO: Add in later
+    #     start_epoch, global_step = load_checkpoint(
+    #         model, optimizer, scheduler, args.resume_from, device
+    #     )
+
+    loss_history = []
+    wandb_run_id = None
+    checkpoint = None
+
+    # TODO: Add code to load from checkpoint
+
+    if wandb_run_id:
+        wandb.init(
+            project=args.wandb_project,
+            id=wandb_run_id, 
+            resume="must" 
+        )
+    else:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.run_name,
+            config=vars(args)
+        )
+        wandb_run_id = wandb.run.id
+
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device.type}\n")
     if device.type == "cuda":
@@ -307,18 +336,6 @@ def main():
     # Resume from Checkpoint if specified
     # =======================================================================
 
-    start_epoch = 0
-    global_step = 0
-
-    # if args.resume_from: # TODO: Add in later
-    #     start_epoch, global_step = load_checkpoint(
-    #         model, optimizer, scheduler, args.resume_from, device
-    #     )
-
-    loss_history = []
-    wandb_run_id = None
-    checkpoint = None
-
     # # Load checkpoint if resuming
     # if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint): # TODO: Make this work for lidaremma
     #     print(colored(f"--- Resuming training from: {args.resume_from_checkpoint} ---", "yellow"))
@@ -362,20 +379,6 @@ def main():
     
     # args.output_dir = os.path.join(args.output_dir, args.run_name)
     # os.makedirs(args.output_dir, exist_ok=True)
-
-    if wandb_run_id:
-        wandb.init(
-            project=args.wandb_project,
-            id=wandb_run_id, 
-            resume="must" 
-        )
-    else:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.run_name,
-            config=vars(args)
-        )
-        wandb_run_id = wandb.run.id
 
     print(colored("--- Training Configuration ---", "cyan"))
     if args.use_lidar:
@@ -574,7 +577,7 @@ def main():
         if (epoch + 1) % args.save_every == 0 or (epoch + 1) == args.epochs:
             checkpoint_path = output_dir / f"checkpoint_epoch_{epoch+1}.pth"
             save_checkpoint(
-                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, checkpoint_path
+                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, checkpoint_path, use_lidar=args.use_lidar
             )
             print(colored(f"✓ Checkpoint saved: {checkpoint_path}", "yellow"))
             
@@ -592,7 +595,7 @@ def main():
             best_loss = avg_epoch_loss
             best_checkpoint_path = output_dir / "best_checkpoint.pth"
             save_checkpoint(
-                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, best_checkpoint_path
+                model, optimizer, scheduler, epoch + 1, global_step, avg_epoch_loss, best_checkpoint_path, use_lidar=args.use_lidar
             )
             print(colored(f"✓ New best model! Loss: {best_loss:.4f}", "green"))
             
@@ -616,7 +619,7 @@ def main():
     # Save final checkpoint
     final_ckpt_path = output_dir / "final_checkpoint.pth"
     save_checkpoint(
-        model, optimizer, scheduler, args.epochs, global_step, loss_history[-1], final_ckpt_path
+        model, optimizer, scheduler, args.epochs, global_step, loss_history[-1], final_ckpt_path, use_lidar=args.use_lidar
     )
     
     # ========================================================================
