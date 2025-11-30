@@ -239,6 +239,10 @@ def main():
     start_epoch = 0
     global_step = 0
 
+    # Add date to run_name to keep it unique
+    date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+    args.run_name += f"{date_str}
+
     # if args.resume_from: # TODO: Add in later
     #     start_epoch, global_step = load_checkpoint(
     #         model, optimizer, scheduler, args.resume_from, device
@@ -355,9 +359,6 @@ def main():
         
     #     print(colored(f"--- Resumed from Epoch {start_epoch}. WandB Run ID: {wandb_run_id} ---", "yellow"))
     # else:
-    if args.run_name is None:
-        date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-        args.run_name = f"{date_str}-epochs{args.epochs}"
 
     # if args.freeze_encoder: # Removed, assuming get_trainable_parameters() handles this
     #     # For QwenCLIP: Freeze vision tower. For LidarEMMA: Freeze both encoders.
