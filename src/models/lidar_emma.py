@@ -451,8 +451,8 @@ class LidarEMMA(BaseModel):
             eos_token_id=self.tokenizer.eos_token_id,
             # do_sample=False,     # Greedy decoding for consistency
             # num_beams=5,         # No beam search
-            # output_scores=True,
-            # return_dict_in_generate=True
+            output_scores=True,
+            return_dict_in_generate=True
         )
 
         generated_ids = outputs.sequences
