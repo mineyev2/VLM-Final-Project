@@ -4,13 +4,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
 
 # Local files
 from src.models.qwen_clip_model import QwenCLIPModel
 from src.models.lidar_emma import LidarEMMA
 from scripts.nuscenes_dataset import NuScenesDataset
 from training_configs.dataclass import TrainingArgs
+from src.utils.lidaremma_utils import collate_fn
 
 # Other
 import argparse
@@ -44,35 +44,6 @@ import logging
 #         'input_ids': input_ids,
 #         'labels': labels
 #     }
-
-def collate_fn(batch, tokenizer_pad_id):
-    """
-    Collate function for batching dataset samples.
-    
-    Args:
-        batch: List of dataset samples
-        tokenizer_pad_id: Padding token ID
-    
-    Returns:
-        dict with batched tensors
-    """
-    images = [item.get("image") for item in batch]
-    input_ids = [item.get("input_ids") for item in batch]
-    labels = [item.get("labels") for item in batch]
-    
-    # LiDAR point clouds (list of tensors, variable size)
-    lidar_list = [item.get("lidar", item.get("point_cloud", None)) for item in batch]
-    
-    # Pad text sequences so they are the same length in the batch
-    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer_pad_id)
-    labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
-    
-    return {
-        "images": images,
-        "input_ids": input_ids_padded,
-        "labels": labels_padded,
-        "lidar": lidar_list,
-    }
 
 def load_yaml_config(path):
     with open(path, "r") as f:

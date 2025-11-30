@@ -419,7 +419,7 @@ def evaluate(args):
         
         num_valid_waypoints = pred_coords.shape[0]
         format_compliant = (num_valid_waypoints == 10)
-
+        
         if pred_coords.shape[0] < 10:
             # pad with NaNs so shapes align
             pad = np.full((10 - pred_coords.shape[0], 2), np.nan)

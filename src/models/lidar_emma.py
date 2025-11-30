@@ -222,28 +222,18 @@ class LidarEMMA(BaseModel):
             self.language_model.eval()
         
         return self
-
-    def forward(
-        self,
-        images=None,
-        point_clouds=None,
-        input_ids=None,
-        labels=None,
-        return_features=False,
-    ):
-        """
-        Forward pass for the multimodal model.
+    
+    # def eval(self, mode=True):
+    #     raise NotImplementedError("Custom eval method not implemented yet.")
+    
+    def prepare_multimodal_embeddings(self,
+                                        images=None,
+                                        point_clouds=None,
+                                        input_ids=None,
+                                        labels=None,
+                                        return_features=False,
+                                    ):
         
-        Args:
-            images: [B, 3, H, W] preprocessed tensor (optional)
-            point_clouds: list of length B, each (N_i, 4) tensor (optional)
-            input_ids: [B, L] token ids (required)
-            return_features: bool, if True return feature dict alongside logits
-            
-        Returns:
-            logits: [B, L, V] model logits
-            features_dict: (optional) dict with 'vision', 'lidar', etc.
-        """
         # Ensure input_ids is [B, L]
         if input_ids is not None and input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
@@ -253,7 +243,9 @@ class LidarEMMA(BaseModel):
         multimodal_embeddings = []
         multimodal_len = 0
 
-        # -------- Vision --------
+        # ====================================================================
+        # Vision Encoder + Projector
+        # ====================================================================
         if images is not None:
             with torch.no_grad() if not self.vision_tower.training else torch.enable_grad():
                 vision_outputs = self.vision_tower(pixel_values=images.to(self.device))
@@ -269,7 +261,9 @@ class LidarEMMA(BaseModel):
         else:
             raise ValueError("Image input is required for vision encoder.")
 
-        # -------- LiDAR ---------
+        # ====================================================================
+        # LiDAR Encoder + Projector
+        # ====================================================================
         if self.use_lidar and point_clouds is not None:
             with torch.no_grad() if not self.lidar_encoder.training else torch.enable_grad():
                 if return_features:
@@ -299,20 +293,26 @@ class LidarEMMA(BaseModel):
         elif self.use_lidar:
             raise ValueError("LiDAR input is required for LiDAR encoder.")
 
-        # -------- Text ----------
+        # ====================================================================
+        # Convert text to embeddings
+        # ====================================================================
         if input_ids is None:
             raise ValueError("input_ids must be provided for language modeling.")
         text_embeddings = self.language_model.get_input_embeddings()(input_ids.to(self.device))
         text_embeddings = text_embeddings.to(dtype)
 
-        # ------ Fuse & Decode -----
+        # ====================================================================
+        # Fuse embeddings
+        # ====================================================================
         if multimodal_embeddings:
             multimodal_embeds = torch.cat(multimodal_embeddings, dim=1)  # [B, M, H]
             combined_embeddings = torch.cat([multimodal_embeds, text_embeddings], dim=1)  # [B, M+L, H]
         else:
             combined_embeddings = text_embeddings  # [B, L, H]
 
-        # ----- Labels for Loss Computation -----
+        # ====================================================================
+        # Pad labels for Loss Computation
+        # ====================================================================
         if labels is not None:
             # Create filler for multimodal tokens (ignore index -100)
             batch_size = labels.shape[0]
@@ -329,7 +329,39 @@ class LidarEMMA(BaseModel):
                 combined_labels = labels.to(self.device)
         else:
             combined_labels = None
+        
+        return combined_embeddings, combined_labels, features_dict, multimodal_len
 
+    def forward(
+        self,
+        images=None,
+        point_clouds=None,
+        input_ids=None,
+        labels=None,
+        return_features=False,
+    ):
+        """
+        Forward pass for the multimodal model.
+        
+        Args:
+            images: [B, 3, H, W] preprocessed tensor (optional)
+            point_clouds: list of length B, each (N_i, 4) tensor (optional)
+            input_ids: [B, L] token ids (required)
+            return_features: bool, if True return feature dict alongside logits
+            
+        Returns:
+            logits: [B, L, V] model logits
+            features_dict: (optional) dict with 'vision', 'lidar', etc.
+        """
+
+        # ====================================================================
+        # Prepare multimodal embedddings
+        # ====================================================================
+        combined_embeddings, combined_labels, features_dict, _ = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
+
+        # ====================================================================
+        # Decode final output with language model
+        # ====================================================================
         outputs = self.language_model(
             inputs_embeds=combined_embeddings,
             use_cache=False, # TODO: What is this?
@@ -342,40 +374,76 @@ class LidarEMMA(BaseModel):
         return outputs
 
     # =========================================================================
-    def generate_trajectory(self, images, point_clouds, ego_positions):
-        """
-        FOR INFERENCE: The non-differentiable generation method.
-        """
+    def generate_trajectory(
+        self,
+        text_attention_mask,
+        images=None,
+        point_clouds=None,
+        input_ids=None,
+        labels=None,
+        return_features=False,
+    ):
+        # """
+        # FOR INFERENCE: The non-differentiable generation method.
+        # """
 
-        image_features = self.vision_tower(pixel_values=images).last_hidden_state
-        projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
+        # image_features = self.vision_tower(pixel_values=images).last_hidden_state
+        # projected_image_features = self.mlp_projector(image_features.to(torch.bfloat16))
 
-        # --- Prompt formatting (same as before) ---
-        prompts = []
-        for pos_tensor in ego_positions:
-            pos_list = [f"[{pos[0]:.2f}, {pos[1]:.2f}]" for pos in pos_tensor]
-            pos_str = ", ".join(pos_list)
-            final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
-            prompts.append(final_prompt)
+        # # --- Prompt formatting (same as before) ---
+        # prompts = []
+        # for pos_tensor in ego_positions:
+        #     pos_list = [f"[{pos[0]:.2f}, {pos[1]:.2f}]" for pos in pos_tensor]
+        #     pos_str = ", ".join(pos_list)
+        #     final_prompt = f"{self.prompt_part1}[{pos_str}]\n{self.prompt_part2}"
+        #     prompts.append(final_prompt)
 
-        if self.llm == "Qwen/Qwen2.5-3B":
-            print(colored("Using Qwen2.5-3B prompt template...", "cyan"))
-            full_prompts = [self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True, enable_thinking=False
-            ) for p in prompts]
-        else:
-            full_prompts = [self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True,
-            ) for p in prompts]
+        # if self.llm == "Qwen/Qwen2.5-3B":
+        #     print(colored("Using Qwen2.5-3B prompt template...", "cyan"))
+        #     full_prompts = [self.tokenizer.apply_chat_template(
+        #         [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True, enable_thinking=False
+        #     ) for p in prompts]
+        # else:
+        #     full_prompts = [self.tokenizer.apply_chat_template(
+        #         [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True,
+        #     ) for p in prompts]
         
-        inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
-        text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
-        combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
+        # inputs = self.tokenizer(full_prompts, return_tensors="pt", padding=True).to(self.device)
+        # text_embeddings = self.language_model.get_input_embeddings()(inputs.input_ids)
+        # combined_embeddings = torch.cat([projected_image_features, text_embeddings], dim=1)
 
-        # Create attention mask for image embeddings (all real)
-        image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
-        # Combine with text attention mask
-        combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+        # # Create attention mask for image embeddings (all real)
+        # image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
+        # # Combine with text attention mask
+        # combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+
+        # text_attention_mask = input_ids.attention_mask
+
+        # ====================================================================
+        # Create attention mask
+        # ====================================================================
+        # image_attention = torch.ones(projected_image_features.shape[:2], dtype=torch.long, device=self.device)
+        # if (self.use_lidar):
+
+
+
+        # ====================================================================
+        # Prepare multimodal embeddings
+        # ====================================================================
+        batch_size = images.shape[0]
+        combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
+        # combined_attention_mask = torch.cat([image_attention, inputs.attention_mask], dim=1)
+
+        # print("Batch size:", batch_size)
+        # print("Text attention mask dims: ", text_attention_mask.shape)
+        
+        # print("Multimodal length:", multimodal_len)
+
+        multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
+        combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
+
+        # print("Attentnion mask for first element in batch:")
+        # print(combined_attention_mask[0])
 
         # --- Generation with strict constraints to prevent thinking mode ---
         outputs = self.language_model.generate(
@@ -392,8 +460,8 @@ class LidarEMMA(BaseModel):
         )
 
         generated_ids = outputs.sequences
-        generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        return outputs, generated_text
+        generated_texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        return outputs, generated_texts
 
     # =========================================================================
 

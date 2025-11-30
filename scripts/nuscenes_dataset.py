@@ -22,6 +22,7 @@ class NuScenesDataset(Dataset):
         prompt_part2,
         nsweeps=5,
         min_dist: float = 0.5,
+        return_attention_mask=False,
         output_lidar=False):
         """
         Initialize the NuScenes dataset for use with PyTorch.
@@ -31,6 +32,7 @@ class NuScenesDataset(Dataset):
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.nsweeps = nsweeps 
         self.output_lidar = output_lidar
+        self.return_attention_mask = return_attention_mask
 
         self.min_dist = min_dist
         self.tokenizer = tokenizer
@@ -198,13 +200,17 @@ class NuScenesDataset(Dataset):
         # =============================================================================
         # 7. Tokenization & Labels
         # =============================================================================
-        input_ids = self.tokenizer(
+        inputs = self.tokenizer(
             full_text, 
             return_tensors="pt", 
             padding="max_length", 
             max_length=512, # Manage carefully. Big number leads to OOM for GPU
             truncation=True
-        ).input_ids.squeeze(0)
+        )
+        input_ids = inputs.input_ids.squeeze(0)
+
+        if self.return_attention_mask:
+            attention_mask = inputs.attention_mask.squeeze(0)
         
         labels = input_ids.clone()
         
@@ -225,21 +231,41 @@ class NuScenesDataset(Dataset):
         # =============================================================================
         # 8. Return Data
         # =============================================================================
-        return {
-            'image': image,
-            'lidar': torch_pointcloud,
-            'input_ids': input_ids,
-            'labels': labels,
-            'ego_positions': history_points,
-            'waypoints': future_points,
-            'cam_to_ego': {
-                'translation': cam_calib['translation'],
-                'rotation': cam_calib['rotation'],
-                'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
-            },
-            'ego_to_world': {
-                'translation': ego_pose_curr['translation'],
-                'rotation': ego_pose_curr['rotation']
+        if self.return_attention_mask:
+            return {
+                'image': image,
+                'lidar': torch_pointcloud,
+                'input_ids': input_ids,
+                'text_attention_mask': attention_mask,
+                'labels': labels,
+                'ego_positions': history_points,
+                'waypoints': future_points,
+                'cam_to_ego': {
+                    'translation': cam_calib['translation'],
+                    'rotation': cam_calib['rotation'],
+                    'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
+                },
+                'ego_to_world': {
+                    'translation': ego_pose_curr['translation'],
+                    'rotation': ego_pose_curr['rotation']
+                }
             }
-        }
-    
+        else:
+            return {
+                'image': image,
+                'lidar': torch_pointcloud,
+                'input_ids': input_ids,
+                'labels': labels,
+                'ego_positions': history_points,
+                'waypoints': future_points,
+                'cam_to_ego': {
+                    'translation': cam_calib['translation'],
+                    'rotation': cam_calib['rotation'],
+                    'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
+                },
+                'ego_to_world': {
+                    'translation': ego_pose_curr['translation'],
+                    'rotation': ego_pose_curr['rotation']
+                }
+            }
+        
