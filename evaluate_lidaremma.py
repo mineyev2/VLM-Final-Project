@@ -29,6 +29,42 @@ import yaml
 from dataclasses import fields
 import logging
 
+
+def load_model(args, device):
+
+    model = LidarEMMA(device,
+                llm=args.llm,
+                freeze_encoders=True,
+                freeze_llm=True,
+                use_lidar=args.use_lidar,
+                lidar_pooling=False) # Always false for now
+    # Load checkpoint
+    checkpt = torch.load(args.checkpoint, map_location=device)
+    if 'vision_projector_state_dict' in checkpt:
+        model.vision_projector.load_state_dict(checkpt['vision_projector_state_dict'])
+        print("✓ Vision Projector loaded")
+
+    if 'lidar_projector_state_dict' in checkpt and hasattr(model, 'lidar_projector'):
+        model.lidar_projector.load_state_dict(checkpt['lidar_projector_state_dict'])
+        print("✓ LiDAR Projector loaded")
+
+    # Load Encoders/LLM
+    if 'vision_encoder_state_dict' in checkpt:
+        model.vision_tower.load_state_dict(checkpt['vision_encoder_state_dict'])
+        print("✓ Vision Encoder loaded")
+        
+    if 'lidar_encoder_state_dict' in checkpt:
+        model.lidar_encoder.load_state_dict(checkpt['lidar_encoder_state_dict'])
+        print("✓ LiDAR Encoder loaded")
+        
+    if 'llm_state_dict' in checkpt:
+        model.language_model.load_state_dict(checkpt['llm_state_dict'])
+        print("✓ LLM loaded")
+    model.eval() # Set to eval mode
+
+    return model
+
+
 def main():
 
     # ========================================================================
@@ -79,14 +115,7 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
     
-    model = LidarEMMA(device,
-                llm=args.llm,
-                freeze_encoders=True,
-                freeze_llm=True,
-                use_lidar=args.use_lidar,
-                lidar_pooling=False) # Always false for now
-    model.eval() # Set to eval mode
-    
+    model = load_model(args, device)
     tokenizer = model.tokenizer
     
     print("\nLoading dataset...")
