@@ -430,6 +430,13 @@ class LidarEMMA(BaseModel):
         # Prepare multimodal embeddings
         # ====================================================================
         batch_size = images.shape[0]
+
+        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+        forced_token = forced_token_ids[0]  # First token of the phrase
+        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+
+        input_ids = torch.cat([input_ids, future_token_tensor], dim=1)
+
         combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
 
         # ====================================================================
