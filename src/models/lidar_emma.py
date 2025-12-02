@@ -98,7 +98,6 @@ class LidarEMMA(BaseModel):
 
         else:
             print(colored("      Skipping LiDAR encoder setup (use_lidar=False)", "yellow"))
-            self.lidar_encoder = None # TODO: Necessary?
 
         # ================================
         # 3) Language Model (Qwen)
@@ -192,6 +191,29 @@ class LidarEMMA(BaseModel):
         print("Model initialization complete!")
         print(f"{'='*70}\n")
 
+        # ================================
+        # 6) Setup Text Delimiters
+        # ================================
+        # specific strings you want to use
+        self.img_start_ids = torch.tensor(
+            self.tokenizer("Image Start: ", add_special_tokens=False).input_ids, 
+            dtype=torch.long
+        ).to(self.device)
+
+        self.img_end_ids = torch.tensor(
+            self.tokenizer(" Image End.", add_special_tokens=False).input_ids, 
+            dtype=torch.long
+        ).to(self.device)
+        
+        self.lidar_start_ids = torch.tensor(
+            self.tokenizer("LiDAR Start: ", add_special_tokens=False).input_ids,
+            dtype=torch.long
+        ).to(self.device)
+        self.lidar_end_ids = torch.tensor(
+            self.tokenizer(" LiDAR End.", add_special_tokens=False).input_ids,
+            dtype=torch.long
+        ).to(self.device)
+
         # # ================================
         # # 6) Prompt template
         # # ================================
@@ -207,6 +229,19 @@ class LidarEMMA(BaseModel):
         #     "Output exactly 10 waypoints formatted as: "
         #     "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]"
         # )
+
+    # =========================================================================
+
+    def _get_text_embeds(self, token_ids, batch_size, dtype):
+        """Helper to get repeated embeddings for a sequence of text tokens."""
+        # Get the embedding layer
+        embed_layer = self.language_model.get_input_embeddings()
+        
+        # Get embeddings for the sequence: [Seq_Len, Hidden_Size]
+        embeds = embed_layer(token_ids)
+        
+        # Expand to batch: [B, Seq_Len, Hidden_Size]
+        return embeds.unsqueeze(0).expand(batch_size, -1, -1).to(dtype)
 
     # =========================================================================
 
@@ -248,7 +283,13 @@ class LidarEMMA(BaseModel):
         # ====================================================================
         # Vision Encoder + Projector
         # ====================================================================
+        batch_size = images.shape[0]
         if images is not None:
+
+            start_embeds = self._get_text_embeds(self.img_start_ids, batch_size, dtype)
+            multimodal_embeddings.append(start_embeds)
+            multimodal_len += start_embeds.shape[1]
+
             with torch.no_grad() if not self.vision_tower.training else torch.enable_grad():
                 vision_outputs = self.vision_tower(pixel_values=images.to(self.device))
                 vision_features = vision_outputs.last_hidden_state  # [B, P, C]
@@ -260,6 +301,11 @@ class LidarEMMA(BaseModel):
 
             if return_features:
                 features_dict['vision'] = vision_features.mean(dim=1).to(dtype)
+
+            end_embeds = self._get_text_embeds(self.img_end_ids, batch_size, dtype)
+            multimodal_embeddings.append(end_embeds)
+            multimodal_len += end_embeds.shape[1]
+
         else:
             raise ValueError("Image input is required for vision encoder.")
 
@@ -267,6 +313,11 @@ class LidarEMMA(BaseModel):
         # LiDAR Encoder + Projector
         # ====================================================================
         if self.use_lidar and point_clouds is not None:
+
+            start_embeds = self._get_text_embeds(self.lidar_start_ids, batch_size, dtype)
+            multimodal_embeddings.append(start_embeds)
+            multimodal_len += start_embeds.shape[1]
+
             with torch.no_grad() if not self.lidar_encoder.training else torch.enable_grad():
                 if return_features:
                     lidar_features, attn_weights = self.lidar_encoder(
@@ -292,6 +343,11 @@ class LidarEMMA(BaseModel):
                 features_dict['lidar'] = lidar_features.squeeze(1).to(dtype)
                 if attn_weights is not None:
                     features_dict['lidar_attention'] = attn_weights
+
+            end_embeds = self._get_text_embeds(self.lidar_end_ids, batch_size, dtype)
+            multimodal_embeddings.append(end_embeds)
+            multimodal_len += end_embeds.shape[1]
+
         elif self.use_lidar:
             raise ValueError("LiDAR input is required for LiDAR encoder.")
 
@@ -439,11 +495,20 @@ class LidarEMMA(BaseModel):
 
         combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
 
+        # Force "Future" as the first token by prepending its embedding
+        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+        forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
+        
+        # Get embedding for "Future" token
+        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+        future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
+        combined_embeddings = torch.cat([combined_embeddings, future_embedding], dim=1)
+
         # ====================================================================
         # Generate attention mask
         # ====================================================================
-        multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
-        combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
+        #multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
+        #combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
 
         # print("Attentnion mask for first element in batch:")
         # print(combined_attention_mask[0])
@@ -451,7 +516,7 @@ class LidarEMMA(BaseModel):
         # --- Generation with strict constraints to prevent thinking mode ---
         outputs = self.language_model.generate(
             inputs_embeds=combined_embeddings,
-            attention_mask=combined_attention_mask,
+            #attention_mask=combined_attention_mask,
             max_new_tokens=200,  # Reduced - trajectory should be ~100 tokens max
             min_new_tokens=50,   # Ensure it generates something substantial
             pad_token_id=self.tokenizer.eos_token_id,
@@ -563,3 +628,4 @@ class LidarEMMA(BaseModel):
         if self.use_lidar:
             self.lidar_projector.load_state_dict(ckpt['lidar_projector'])
         print(f"Loaded projectors from {load_path}")
+    
