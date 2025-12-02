@@ -161,7 +161,7 @@ def main():
                  "1a-lidar","2a-lidar", "3a-lidar", "1b-lidar", "2b-lidar", "3b-lidar"],
         help="Select ablation config: 1a, 2a, 3a, 1b, 2b, 3b (no lidar), or 1a-lidar, 2a-lidar, 3a-lidar, 1b-lidar, 2b-lidar, 3b-lidar (with lidar)."
     )
-    parser.add_argument("--run_name", type=str, required=True, help="Custom run name (optional).")
+    # parser.add_argument("--run_name", type=str, required=True, help="Custom run name (optional).")
     parser.add_argument("--wandb_project", type=str, required=True, help="WandB project name.") # Pranav's: "vlm-training"
 
     # Optional args
@@ -210,9 +210,9 @@ def main():
     start_epoch = 0
     global_step = 0
 
-    # Add date to run_name to keep it unique
+    # Add date to ablation to make run_name
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    args.run_name = f"{args.run_name}_{date_str}"
+    args.run_name = f"{args.ablation}_{date_str}"
 
     # if args.resume_from: # TODO: Add in later
     #     start_epoch, global_step = load_checkpoint(
