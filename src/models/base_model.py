@@ -20,11 +20,11 @@ class BaseModel(nn.Module, ABC):
 
         self.prompt_part1 = (
             "You are a self-driving car. Your task is to predict the future trajectory."
-            " Your last recorded positions (x, y) in the global frame are: "
+            " Your last recorded positions (x, y) in the global frame are (starting with the oldest): "
         )
 
         self.prompt_part2 = (
-            "It is critical that you output 10 waypoints in the EXACT format specified below:\n"
+            "It is critical that you output 10 waypoints in the EXACT format (in English) specified below:\n"
             "Future Trajectory: [[x1, y1], [x2, y2], ..., [x10, y10]]\n"
             # ", where each waypoint is in the format [x, y] representing global coordinates to the nearest two decimal places.\n" # Seems like specifying decimal places is not necessary
         )
