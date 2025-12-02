@@ -487,11 +487,11 @@ class LidarEMMA(BaseModel):
         # ====================================================================
         batch_size = images.shape[0]
 
-        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
-        forced_token = forced_token_ids[0]  # First token of the phrase
-        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+        # forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+        # forced_token = forced_token_ids[0]  # First token of the phrase
+        # future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
 
-        input_ids = torch.cat([input_ids, future_token_tensor], dim=1)
+        # input_ids = torch.cat([input_ids, future_token_tensor], dim=1)
 
         combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
 
@@ -510,7 +510,7 @@ class LidarEMMA(BaseModel):
         #multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
         #combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
 
-        # print("Attentnion mask for first element in batch:")
+        # print("Attention mask for first element in batch:")
         # print(combined_attention_mask[0])
 
         # --- Generation with strict constraints to prevent thinking mode ---
@@ -521,10 +521,14 @@ class LidarEMMA(BaseModel):
             min_new_tokens=50,   # Ensure it generates something substantial
             pad_token_id=self.tokenizer.eos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
-            # do_sample=False,     # Greedy decoding for consistency
-            # num_beams=5,         # No beam search
             output_scores=True,
             return_dict_in_generate=True
+
+            # do_sample=False,     # Greedy decoding for consistency
+            # num_beams=5,         # No beam search
+
+            # forced_bos_token_id = <Future token> # Forces first token to be some value. Idk if Qwen allows this or not
+            
         )
 
         generated_ids = outputs.sequences

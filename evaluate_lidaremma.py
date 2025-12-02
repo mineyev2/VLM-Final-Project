@@ -86,7 +86,7 @@ def main():
     # Other args
     parser.add_argument('--dataroot', type=str, default='/storage/ice-shared/cs8803vlm/rmineyev3')
     parser.add_argument('--version', type=str, default='v1.0-test')
-    parser.add_argument('--num_samples', type=int, default=-1, help='Number of samples to evaluate (default 100 or all if -1)')
+    # parser.add_argument('--num_samples', type=int, default=-1, help='Number of samples to evaluate (default 100 or all if -1)')
     parser.add_argument('--batch_size', type=int, default=8)
     # parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
@@ -96,7 +96,9 @@ def main():
     
     args = parser.parse_args()
     args.use_lidar = "lidar" in args.ablation
-    args.run_name = Path(args.checkpoint).stem # run name is same as checkpoint file name
+
+    # Run name is folder name of stem's parent
+    args.run_name = Path(args.checkpoint).parent.name
 
     # Choose LLM based on ablation
     if args.ablation in ("1a", "2a", "3a", "1a-lidar", "2a-lidar", "3a-lidar"):
