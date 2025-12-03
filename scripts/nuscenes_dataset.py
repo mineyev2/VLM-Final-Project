@@ -232,6 +232,7 @@ class NuScenesDataset(Dataset):
         # =============================================================================
         if self.return_attention_mask:
             return {
+                'prompt': prompt,
                 'image': image,
                 'lidar': torch_pointcloud,
                 'input_ids': input_ids,
@@ -251,6 +252,7 @@ class NuScenesDataset(Dataset):
             }
         else:
             return {
+                'prompt': prompt,
                 'image': image,
                 'lidar': torch_pointcloud,
                 'input_ids': input_ids,

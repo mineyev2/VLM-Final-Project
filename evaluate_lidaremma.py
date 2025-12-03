@@ -117,6 +117,10 @@ def main():
     
     model = load_model(args, device)
     tokenizer = model.tokenizer
+
+    tokenizer.padding_side = 'left'
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
     print("\nLoading dataset...")
     ds = NuScenesDataset(
@@ -214,14 +218,28 @@ def main():
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating", leave=False):
             images = batch['images']  # List of PIL images
-            input_ids = batch['input_ids'].to(device)
+
+            # DON'T USE INPUT IDS. IT HAS THE ANSWERS IN IT TOO.
+            #input_ids = batch['input_ids'].to(device)
+
+            # USE PROMPT DIRECTLY INSTEAD
+            prompt_texts = batch['prompt_texts']
+
+            inputs = tokenizer(
+                prompt_texts, 
+                padding=True, 
+                return_tensors="pt"
+            ).to(device)
+            
+            input_ids = inputs.input_ids
+            attention_mask_eval = inputs.attention_mask
+
             labels = batch['labels'].to(device)
-            lidar_data = batch.get("lidar", None) # TODO: Rewrite so it uses device gpu
+            lidar_data = batch.get("lidar", None)
 
             # Extra data loaded for evaluation
             batch_gt_waypoints = batch.get("waypoints", None)
             batch_ego_positions = batch.get("ego_positions", None)
-            text_attention_masks = batch['text_attention_masks'].to(device)
 
             # Process images with CLIP processor
             pixel_values = model.image_processor(images=images, return_tensors="pt").pixel_values.to(device)
@@ -239,7 +257,7 @@ def main():
                     
             try:
                 gen_texts = model.generate_trajectory(
-                    text_attention_masks,
+                    text_attention_mask=attention_mask_eval,
                     images=pixel_values,
                     point_clouds=point_clouds,
                     input_ids=input_ids,

@@ -35,6 +35,8 @@ def collate_fn(batch, tokenizer_pad_id, training=True):
     # Pad text sequences so they are the same length in the batch
     input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer_pad_id)
     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
+
+    prompt_texts = [item.get("prompt", "") for item in batch]
     
     if not training:
         return {
@@ -42,9 +44,10 @@ def collate_fn(batch, tokenizer_pad_id, training=True):
             "input_ids": input_ids_padded,
             "labels": labels_padded,
             "lidar": lidar_list,
-            "text_attention_masks": text_attention_masks_padded,
+            "text_attention_mask": text_attention_masks_padded,
             "waypoints": gt_waypoints,
             "ego_positions": ego_positions,
+            "prompt_texts": prompt_texts,
         }
         
     else:
@@ -53,6 +56,7 @@ def collate_fn(batch, tokenizer_pad_id, training=True):
             "input_ids": input_ids_padded,
             "labels": labels_padded,
             "lidar": lidar_list,
+            "prompt_texts": prompt_texts,
         }
 
 def parse_coords_from_text(text):

@@ -489,19 +489,19 @@ class LidarEMMA(BaseModel):
         combined_embeddings, combined_labels, features_dict, multimodal_len = self.prepare_multimodal_embeddings(images=images, point_clouds=point_clouds, input_ids=input_ids, labels=labels, return_features=return_features)
 
         # Force "Future" as the first token by prepending its embedding
-        forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
-        forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
+        #forced_token_ids = self.tokenizer("Future", add_special_tokens=False).input_ids
+        #forced_token = forced_token_ids[0]  # "Future" is a single token (ID 24206)
         
         # Get embedding for "Future" token
-        future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
-        future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
-        combined_embeddings = torch.cat([combined_embeddings, future_embedding], dim=1)
+        #future_token_tensor = torch.tensor([[forced_token]] * batch_size, device=self.device)
+        #future_embedding = self.language_model.get_input_embeddings()(future_token_tensor)  # [B, 1, hidden_dim]
+        #combined_embeddings = torch.cat([combined_embeddings, future_embedding], dim=1)
 
         # ====================================================================
         # Generate attention mask
         # ====================================================================
-        #multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
-        #combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
+        multimodal_attention_mask = torch.ones([batch_size, multimodal_len], dtype=torch.long, device=self.device)
+        combined_attention_mask = torch.cat([multimodal_attention_mask, text_attention_mask], dim=1)
 
         # print("Attentnion mask for first element in batch:")
         # print(combined_attention_mask[0])
@@ -509,7 +509,7 @@ class LidarEMMA(BaseModel):
         # --- Generation with strict constraints to prevent thinking mode ---
         outputs = self.language_model.generate(
             inputs_embeds=combined_embeddings,
-            #attention_mask=combined_attention_mask,
+            attention_mask=combined_attention_mask,
             max_new_tokens=200,  # Reduced - trajectory should be ~100 tokens max
             min_new_tokens=50,   # Ensure it generates something substantial
             pad_token_id=self.tokenizer.eos_token_id,
