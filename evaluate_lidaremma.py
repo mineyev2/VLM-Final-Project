@@ -271,7 +271,9 @@ def main():
                 fde = l2_per_waypoint[-1] if len(l2_per_waypoint) >= 10 else np.nan
                 
                 error_at_1s = l2_per_waypoint[1] if len(l2_per_waypoint) > 1 else np.nan
-                failure_rate = True if (error_at_1s > 10.0 or np.isnan(error_at_1s)) else False
+                any_severe_error = np.any(l2_per_waypoint > 100.0)
+                has_nans = np.any(np.isnan(l2_per_waypoint))
+                failure_rate = True if (error_at_1s > 10.0 or any_severe_error or has_nans) else False
 
                 result = {
                     'idx': idx,
