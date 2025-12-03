@@ -27,23 +27,7 @@ import yaml
 from dataclasses import fields
 import logging
 
-# def custom_collate_fn(batch):
-#     """
-#     Custom collate to handle the new dataset output structure.
-#     Stacks tensors (input_ids, labels) and collects PIL images into a list.
-#     """
-#     # Collect raw PIL images into a list (processor handles batching later)
-#     raw_images = [item['image'] for item in batch]
-    
-#     # Stack tensors
-#     input_ids = torch.stack([item['input_ids'] for item in batch])
-#     labels = torch.stack([item['labels'] for item in batch])
-    
-#     return {
-#         'raw_images': raw_images,
-#         'input_ids': input_ids,
-#         'labels': labels
-#     }
+
 
 def load_yaml_config(path):
     with open(path, "r") as f:
@@ -161,7 +145,6 @@ def main():
                  "1a-lidar","2a-lidar", "3a-lidar", "1b-lidar", "2b-lidar", "3b-lidar"],
         help="Select ablation config: 1a, 2a, 3a, 1b, 2b, 3b (no lidar), or 1a-lidar, 2a-lidar, 3a-lidar, 1b-lidar, 2b-lidar, 3b-lidar (with lidar)."
     )
-    # parser.add_argument("--run_name", type=str, required=True, help="Custom run name (optional).")
     parser.add_argument("--wandb_project", type=str, required=True, help="WandB project name.") # Pranav's: "vlm-training"
 
     # Optional args
@@ -175,7 +158,6 @@ def main():
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training.")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs.")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint file to resume training.")
 
     terminal_args = parser.parse_args()
 
@@ -214,16 +196,9 @@ def main():
     date_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     args.run_name = f"{args.ablation}_{date_str}"
 
-    # if args.resume_from: # TODO: Add in later
-    #     start_epoch, global_step = load_checkpoint(
-    #         model, optimizer, scheduler, args.resume_from, device
-    #     )
-
     loss_history = []
     wandb_run_id = None
     checkpoint = None
-
-    # TODO: Add code to load from checkpoint
 
     if wandb_run_id:
         wandb.init(
@@ -245,11 +220,6 @@ def main():
     if device.type == "cuda":
         torch.cuda.empty_cache()
         gc.collect()
-    
-    # if args.use_lidar:
-    #     model = LidarEMMA(device, llm=args.llm, freeze_encoders=args.freeze_encoder, freeze_llm=args.freeze_lang_model, use_lidar=args.use_lidar)
-    # else:
-    #     model = QwenCLIPModel(device, llm=args.llm, freeze_encoder=args.freeze_encoder, freeze_llm=args.freeze_lang_model)
 
     model = LidarEMMA(device,
                       llm=args.llm,
@@ -257,15 +227,11 @@ def main():
                       freeze_llm=args.freeze_lang_model,
                       use_lidar=args.use_lidar,
                       lidar_pooling=args.lidar_pooling)
-
-
-    tokenizer = model.tokenizer
     
     print("\nLoading dataset...")
     dataset = NuScenesDataset(
         version=args.version,
         dataroot=args.dataroot,
-        tokenizer=model.tokenizer,
         prompt_part1=model.prompt_part1,
         prompt_part2=model.prompt_part2,
         output_lidar=args.use_lidar,
@@ -273,8 +239,7 @@ def main():
     print(f"✓ Dataset loaded: {len(dataset)} samples\n")
 
     # Create dataloader
-    pad_id = tokenizer.pad_token_id
-    custom_collate_fn = lambda batch: collate_fn(batch, pad_id)
+    custom_collate_fn = lambda batch: collate_fn(batch)
     
     dataloader = DataLoader(
         dataset,
@@ -307,50 +272,9 @@ def main():
     
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # ========================================================================
-    # Resume from Checkpoint if specified
-    # =======================================================================
-
-    # # Load checkpoint if resuming
-    # if args.resume_from_checkpoint and os.path.exists(args.resume_from_checkpoint): # TODO: Make this work for lidaremma
-    #     print(colored(f"--- Resuming training from: {args.resume_from_checkpoint} ---", "yellow"))
-    #     checkpoint = torch.load(args.resume_from_checkpoint, weights_only=False, map_location=device)
-        
-    #     model.mlp_projector.load_state_dict(checkpoint['mlp_projector_state_dict'])
-    #     model.vision_tower.load_state_dict(checkpoint['vision_tower_state_dict'])
-    #     model.language_model.load_state_dict(checkpoint['language_model_state_dict'])
-        
-    #     start_epoch = checkpoint['epoch']
-    #     loss_history = checkpoint['loss_history']
-    #     wandb_run_id = checkpoint['wandb_run_id']
-    #     args.run_name = checkpoint['run_name']
-
-    #     args.freeze_encoder = checkpoint['args'].freeze_encoder
-    #     args.freeze_lang_model = checkpoint['args'].freeze_lang_model
-        
-    #     print(colored(f"--- Resumed from Epoch {start_epoch}. WandB Run ID: {wandb_run_id} ---", "yellow"))
-    # else:
-
-    # if args.freeze_encoder: # Removed, assuming get_trainable_parameters() handles this
-    #     # For QwenCLIP: Freeze vision tower. For LidarEMMA: Freeze both encoders.
-    #     model.freeze_encoder()
-    # else:
-    #     optimizer.add_param_group({'params': model.vision_tower.parameters(), 'lr': args.lr * 0.1})
-    # if args.freeze_lang_model:
-    #     model.language_model.requires_grad_(False)
-    # else:
-    #     optimizer.add_param_group({'params': model.language_model.parameters(), 'lr': args.lr * 0.1})
-
     # Create output directory
     output_dir = Path(args.output_dir) / args.run_name
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # if checkpoint:
-    #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    #     print(colored("--- Optimizer state successfully restored ---", "yellow"))
-    
-    # args.output_dir = os.path.join(args.output_dir, args.run_name)
-    # os.makedirs(args.output_dir, exist_ok=True)
 
     print(colored("--- Training Configuration ---", "cyan"))
     if args.use_lidar:
@@ -388,10 +312,12 @@ def main():
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
         
         for batch_idx, batch in enumerate(progress_bar):
+            # Get prompt and target text
+            prompt = batch['prompt']
+            target_text = batch['target_text']
+
             # Extract batch data
             images = batch['images']  # List of PIL images
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
             lidar_data = batch.get("lidar", None)
             
             # Process images with CLIP processor
@@ -414,49 +340,17 @@ def main():
             # Forward pass
             try:
                 outputs = model(
+                    prompt=prompt,
+                    target_text=target_text,
                     images=pixel_values,
                     point_clouds=point_clouds,
-                    input_ids=input_ids,
-                    labels=labels,
                 )
-                
-                # # ================================================================
-                # # FIX: Adjust labels to match logits length
-                # # ================================================================
-                # if logits.shape[1] != labels.shape[1]:
-                #     # Calculate number of multimodal tokens
-                #     num_multimodal_tokens = logits.shape[1] - labels.shape[1]
-                    
-                #     # Create padding with -100 (ignore_index)
-                #     padding = torch.full(
-                #         (labels.shape[0], num_multimodal_tokens),
-                #         -100,
-                #         dtype=labels.dtype,
-                #         device=labels.device
-                #     )
-                    
-                #     # Concatenate padding before labels
-                #     labels = torch.cat([padding, labels], dim=1)
-                    
-                #     # Verify shapes match
-                #     assert logits.shape[1] == labels.shape[1], \
-                #         f"Shape mismatch: logits {logits.shape[1]} vs labels {labels.shape[1]}"
-
-                # shift_logits = logits[..., :-1, :].contiguous()
-                # shift_labels = labels[..., 1:].contiguous()
-
-                # # 3. Compute Loss
-                # loss = loss_fn(
-                #     shift_logits.view(-1, shift_logits.size(-1)),
-                #     shift_labels.view(-1)
-                # )
 
                 loss = outputs.loss
                 
             except Exception as e:
                 logging.error(f"Forward pass failed: {e}")
                 logging.error(f"Batch size: {len(images)}")
-                logging.error(f"Input IDs shape: {input_ids.shape}")
                 logging.error(f"Point clouds: {point_clouds is not None}")
                 raise
             

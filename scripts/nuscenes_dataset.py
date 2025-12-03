@@ -17,12 +17,10 @@ class NuScenesDataset(Dataset):
         self,
         version,
         dataroot,
-        tokenizer,
         prompt_part1,
         prompt_part2,
         nsweeps=5,
         min_dist: float = 0.5,
-        return_attention_mask=False,
         output_lidar=False):
         """
         Initialize the NuScenes dataset for use with PyTorch.
@@ -32,10 +30,8 @@ class NuScenesDataset(Dataset):
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.nsweeps = nsweeps 
         self.output_lidar = output_lidar
-        self.return_attention_mask = return_attention_mask
 
         self.min_dist = min_dist
-        self.tokenizer = tokenizer
         self.prompt_part1 = prompt_part1
         self.prompt_part2 = prompt_part2
 
@@ -107,21 +103,6 @@ class NuScenesDataset(Dataset):
         # =============================================================================
         image_path = os.path.join(self.nusc.dataroot, cam_data['filename'])
         image = Image.open(image_path).convert('RGB') # TODO: Does LidarCLIP assume RGB or BGR?
-
-        # =============================================================================
-        # 5. Load lidar (same as LidarCLIP code)
-        # =============================================================================
-        # torch_pointcloud = None
-        # if self.output_lidar:
-        #     nuscenes_pointcloud, _ = LidarPointCloud.from_file_multisweep(
-        #         self.nusc,
-        #         sample,
-        #         chan='LIDAR_TOP',
-        #         ref_chan='LIDAR_TOP',
-        #         nsweeps=self.nsweeps, # TODO: This isn't working right now
-        #         min_distance=1.0  # Filter out points closer than 1 meter
-        #     )
-        #     torch_pointcloud = torch.from_numpy(nuscenes_pointcloud.points.T).float() # OLD!!!!
 
         torch_pointcloud = None
 
@@ -195,76 +176,27 @@ class NuScenesDataset(Dataset):
         wp_str = ", ".join([f"[{p[0]:.2f}, {p[1]:.2f}]" for p in future_points])
         target_text = "Future Trajectory: [" + wp_str + "]"
         
-        full_text = prompt + target_text
-        
-        # =============================================================================
-        # 7. Tokenization & Labels
-        # =============================================================================
-        inputs = self.tokenizer(
-            full_text, 
-            return_tensors="pt", 
-            padding="max_length", 
-            max_length=512, # Manage carefully. Big number leads to OOM for GPU
-            truncation=True
-        )
-        input_ids = inputs.input_ids.squeeze(0)
-        attention_mask = inputs.attention_mask.squeeze(0)
-        
-        labels = input_ids.clone()
-        
-        prompt_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.squeeze(0)
-        prompt_len = prompt_ids.shape[0]
-
-        # Apply -100 mask to the prompt part (loss is only calculated on target_text)
-        if prompt_len < labels.shape[0]:
-            labels[:prompt_len] = -100
-        else:
-            labels[:] = -100 # Safety fallback if truncation cut off the target
-        
-        # Use attention mask to set padding tokens to -100 as well
-        labels[attention_mask == 0] = -100
-        
         # Calibration
         cam_calib = self.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
         
         # =============================================================================
-        # 8. Return Data
+        # 7. Return Data
         # =============================================================================
-        if self.return_attention_mask:
-            return {
-                'image': image,
-                'lidar': torch_pointcloud,
-                'input_ids': input_ids,
-                'text_attention_mask': attention_mask,
-                'labels': labels,
-                'ego_positions': history_points,
-                'waypoints': future_points,
-                'cam_to_ego': {
-                    'translation': cam_calib['translation'],
-                    'rotation': cam_calib['rotation'],
-                    'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
-                },
-                'ego_to_world': {
-                    'translation': ego_pose_curr['translation'],
-                    'rotation': ego_pose_curr['rotation']
-                }
+        return {
+            'prompt': prompt,
+            'target_text': target_text,
+            'image': image,
+            'lidar': torch_pointcloud,
+            'ego_positions': history_points,
+            'waypoints': future_points,
+            'cam_to_ego': {
+                'translation': cam_calib['translation'],
+                'rotation': cam_calib['rotation'],
+                'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
+            },
+            'ego_to_world': {
+                'translation': ego_pose_curr['translation'],
+                'rotation': ego_pose_curr['rotation']
             }
-        else:
-            return {
-                'image': image,
-                'lidar': torch_pointcloud,
-                'input_ids': input_ids,
-                'labels': labels,
-                'ego_positions': history_points,
-                'waypoints': future_points,
-                'cam_to_ego': {
-                    'translation': cam_calib['translation'],
-                    'rotation': cam_calib['rotation'],
-                    'camera_intrinsic': np.array(cam_calib['camera_intrinsic'])
-                },
-                'ego_to_world': {
-                    'translation': ego_pose_curr['translation'],
-                    'rotation': ego_pose_curr['rotation']
-                }
-            }
+        }
         

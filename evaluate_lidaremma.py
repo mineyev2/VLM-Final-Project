@@ -86,13 +86,9 @@ def main():
     # Other args
     parser.add_argument('--dataroot', type=str, default='/storage/ice-shared/cs8803vlm/rmineyev3')
     parser.add_argument('--version', type=str, default='v1.0-test')
-    # parser.add_argument('--num_samples', type=int, default=-1, help='Number of samples to evaluate (default 100 or all if -1)')
     parser.add_argument('--batch_size', type=int, default=8)
-    # parser.add_argument('--output_dir', type=str, default='./eval_outputs', help='Base directory for evaluation outputs')
     parser.add_argument('--output_name', type=str, default='eval_results.csv')
     parser.add_argument('--num_workers', type=int, default=8, help='Number of worker threads for data loading')
-    # parser.add_argument('--llm', type=str, default='Qwen/Qwen3-4B', help='LLM to use for evaluation')
-    # parser.add_argument('--run_name', type=str, required=True, help='Name for this evaluation run (used to keep track of ablations)')
     
     args = parser.parse_args()
     args.use_lidar = "lidar" in args.ablation
@@ -118,23 +114,19 @@ def main():
         gc.collect()
     
     model = load_model(args, device)
-    tokenizer = model.tokenizer
     
     print("\nLoading dataset...")
     ds = NuScenesDataset(
         version=args.version,
         dataroot=args.dataroot,
-        tokenizer=model.tokenizer,
         prompt_part1=model.prompt_part1,
         prompt_part2=model.prompt_part2,
-        return_attention_mask=True,
         output_lidar=args.use_lidar,
     )
     print(f"✓ Dataset loaded: {len(ds)} samples\n")
 
     # Create dataloader
-    pad_id = tokenizer.pad_token_id
-    custom_collate_fn = lambda batch: collate_fn(batch, pad_id, training=False)
+    custom_collate_fn = lambda batch: collate_fn(batch)
     
     dataloader = DataLoader(
         ds,
@@ -215,15 +207,14 @@ def main():
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating", leave=False):
+            prompt = batch['prompt']
+
             images = batch['images']  # List of PIL images
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
             lidar_data = batch.get("lidar", None) # TODO: Rewrite so it uses device gpu
 
             # Extra data loaded for evaluation
             batch_gt_waypoints = batch.get("waypoints", None)
             batch_ego_positions = batch.get("ego_positions", None)
-            text_attention_masks = batch['text_attention_masks'].to(device)
 
             # Process images with CLIP processor
             pixel_values = model.image_processor(images=images, return_tensors="pt").pixel_values.to(device)
@@ -241,16 +232,13 @@ def main():
                     
             try:
                 gen_texts = model.generate_trajectory(
-                    text_attention_masks,
+                    prompt=prompt,
                     images=pixel_values,
                     point_clouds=point_clouds,
-                    input_ids=input_ids,
-                    labels=labels,
                 )
             except Exception as e:
                 logging.error(f"Forward pass failed: {e}")
                 logging.error(f"Batch size: {len(images)}")
-                logging.error(f"Input IDs shape: {input_ids.shape}")
                 logging.error(f"Point clouds: {point_clouds is not None}")
                 raise
 
@@ -283,16 +271,10 @@ def main():
                 fde = l2_per_waypoint[-1] if len(l2_per_waypoint) >= 10 else np.nan
                 
                 error_at_1s = l2_per_waypoint[1] if len(l2_per_waypoint) > 1 else np.nan
-                failure_rate = True if (error_at_1s > 10.0 or np.isnan(error_at_1s)) else False 
-                    
-                # Per-waypoint errors for analysis
-                # waypoint_errors = l2_per_waypoint.tolist()
+                failure_rate = True if (error_at_1s > 10.0 or np.isnan(error_at_1s)) else False
 
                 result = {
                     'idx': idx,
-                    # 'cross_entropy_loss': float(cross_entropy_loss),
-                    # 'perplexity': float(perplexity),
-                    # 'token_accuracy': float(token_accuracy),
                     'num_valid_waypoints': int(num_valid_waypoints),
                     'format_compliant': int(format_compliant),
                     'ade': float(ade),
@@ -305,7 +287,7 @@ def main():
                     'pred_trajectory': str(pred_coords.tolist())
                 }
 
-                                # Add per-waypoint errors to result
+                # Add per-waypoint errors to result
                 for wp_idx in range(10):
                     result[f'wp{wp_idx}_error'] = l2_per_waypoint[wp_idx] if wp_idx < len(l2_per_waypoint) else np.nan
 
