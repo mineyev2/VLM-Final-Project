@@ -1,0 +1,13 @@
+{
+    "ablation": "1a-lidar",
+    "checkpoint": "./outputs/latest/1a-lidar_2025-12-03_17-00-36/best_checkpoint.pth",
+    "dataroot": "/storage/ice-shared/cs8803vlm/rmineyev3",
+    "version": "v1.0-test",
+    "batch_size": 32,
+    "output_name": "eval_results.csv",
+    "num_workers": 8,
+    "use_lidar": true,
+    "run_name": "1a-lidar_2025-12-03_17-00-36",
+    "llm": "Qwen/Qwen2.5-3B",
+    "output_dir": "./eval_outputs/1a-lidar_2025-12-03_17-00-36"
+}

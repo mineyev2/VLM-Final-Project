@@ -1,0 +1,14 @@
+{
+    "ablation": "1a-lidar",
+    "checkpoint": "/home/hice1/rmineyev3/scratch/VLM-Final-Project/outputs/latest/1a-lidar/checkpoint_epoch_20.pth",
+    "dataroot": "/storage/ice-shared/cs8803vlm/rmineyev3",
+    "version": "v1.0-test",
+    "num_samples": 100,
+    "batch_size": 8,
+    "output_dir": "./eval_outputs",
+    "output_name": "eval_results.csv",
+    "num_workers": 8,
+    "use_lidar": true,
+    "run_name": "checkpoint_epoch_20",
+    "llm": "Qwen/Qwen2.5-3B"
+}
