@@ -2,7 +2,6 @@ import cv2
 import os
 import re
 import torch
-import json
 import numpy as np
 from PIL import Image
 from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
@@ -208,55 +207,78 @@ class BaseOpenEMMA:
         else:
             normalized_history = np.zeros((1, 2))
 
-        # 2. Estimate Kinematics
-        hist_speeds, hist_curvs = self.estimate_kinematics(normalized_history, dt=0.5)
-        
-        # Robustly get current speed
-        current_speed = hist_speeds[-1] if len(hist_speeds) > 0 else 0.0
-        avg_speed = np.mean(hist_speeds[-3:]) if len(hist_speeds) >= 3 else current_speed
-        
-        # Determine Trend
-        if len(hist_speeds) >= 3 and hist_speeds[-1] > hist_speeds[0] + 0.5:
-            trend = "ACCELERATING"
-        elif len(hist_speeds) >= 3 and hist_speeds[-1] < hist_speeds[0] - 0.5:
-            trend = "DECELERATING"
-        else:
-            trend = "MAINTAINING SPEED"
-
-        ego_his_trajs_str = str(normalized_history.tolist()).replace("\n", '')
-        speed_hist_str = str([round(s, 2) for s in hist_speeds]).replace("'", "")
-        curv_hist_str = str([round(k, 4) for k in hist_curvs]).replace("'", "")
-
         rationale = self.getCoT(image_path, data["gt_ego_fut_diff"], data["gt_ego_fut_trajs"], data["gt_ego_his_diff"], backbone)
-        
+        ego_his_trajs_str = str(normalized_history.tolist()).replace("\n", '')
         sys_message = "You are an expert autonomous driving agent. Your task is to predict the future trajectory of the ego vehicle."
+
+        ################################################################################################
+        ##################################### Extra Enhancements #######################################
+        ################################################################################################
+        # # 2. Estimate Kinematics
+        # hist_speeds, hist_curvs = self.estimate_kinematics(normalized_history, dt=0.5)
+        
+        # # Robustly get current speed
+        # current_speed = hist_speeds[-1] if len(hist_speeds) > 0 else 0.0
+        # avg_speed = np.mean(hist_speeds[-3:]) if len(hist_speeds) >= 3 else current_speed
+        
+        # # Determine Trend
+        # if len(hist_speeds) >= 3 and hist_speeds[-1] > hist_speeds[0] + 0.5:
+        #     trend = "ACCELERATING"
+        # elif len(hist_speeds) >= 3 and hist_speeds[-1] < hist_speeds[0] - 0.5:
+        #     trend = "DECELERATING"
+        # else:
+        #     trend = "MAINTAINING SPEED"
+
+        # speed_hist_str = str([round(s, 2) for s in hist_speeds]).replace("'", "")
+        # curv_hist_str = str([round(k, 4) for k in hist_curvs]).replace("'", "")
         
         # --- ENHANCED PROMPT ---
         # 1. Explicitly states the Current Speed Goal.
         # 2. Adds a "Trend" indicator to help the model decide to accelerate/brake.
+#         prompt = f"""{sys_message}
+# ##Context:
+# - Command: {command}
+# - Historical Waypoints (Local): {ego_his_trajs_str}
+
+# ##Kinematic State:
+# - Speed History (m/s): {speed_hist_str}
+# - Current Speed: {current_speed:.2f} m/s (Trend: {trend})
+# - Curvature History (1/m): {curv_hist_str}
+
+# ##Driving Logic:
+# {rationale}
+
+# ##Instruction:
+# Predict the future Speed (S) and Curvature (K) for the next 5 seconds (10 frames).
+# 1. **Speed (S):** Initialize prediction at **{current_speed:.2f} m/s**. If the path is clear and command is straight, maintain or slightly increase speed. Do NOT drop speed to near zero unless stopped.
+# 2. **Curvature (K):** Positive = Left, Negative = Right. Use history to smooth the turn.
+
+# ##Output:
+# Return ONLY the vectors in this exact format:
+# S: [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10]
+# K: [k1, k2, k3, k4, k5, k6, k7, k8, k9, k10]
+# """
+
+        ################################################################################################
+        ################################### End Extra Enhancements #####################################
+        ################################################################################################
+
         prompt = f"""{sys_message}
-##Context:
-- Command: {command}
-- Historical Waypoints (Local): {ego_his_trajs_str}
+# ##Context:
+# - Command: {command}
+# - Historical Waypoints (Local): {ego_his_trajs_str}
 
-##Kinematic State:
-- Speed History (m/s): {speed_hist_str}
-- Current Speed: {current_speed:.2f} m/s (Trend: {trend})
-- Curvature History (1/m): {curv_hist_str}
+# ##Driving Logic:
+# {rationale}
 
-##Driving Logic:
-{rationale}
+# ##Instruction:
+# Predict the future Speed (S) and Curvature (K) for the next 5 seconds (10 frames).
 
-##Instruction:
-Predict the future Speed (S) and Curvature (K) for the next 5 seconds (10 frames).
-1. **Speed (S):** Initialize prediction at **{current_speed:.2f} m/s**. If the path is clear and command is straight, maintain or slightly increase speed. Do NOT drop speed to near zero unless stopped.
-2. **Curvature (K):** Positive = Left, Negative = Right. Use history to smooth the turn.
-
-##Output:
-Return ONLY the vectors in this exact format:
-S: [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10]
-K: [k1, k2, k3, k4, k5, k6, k7, k8, k9, k10]
-"""
+# ##Output:
+# Return ONLY the vectors in this exact format:
+# S: [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10]
+# K: [k1, k2, k3, k4, k5, k6, k7, k8, k9, k10]
+# """
         output_text = self.vlm_inference(text=prompt, image_path=image_path)
         speed_vec, curv_vec = self.parse_s_k_vectors(output_text)
         

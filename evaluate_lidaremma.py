@@ -1,33 +1,21 @@
-# PyTorch Files
 import csv
 import json
 from pathlib import Path
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
-
-# Local files
-from src.models.lidar_emma import LidarEMMA
-from scripts.nuscenes_dataset import NuScenesDataset
-from src.utils.lidaremma_utils import collate_fn, parse_coords_from_text
-
-
-# Other
 import argparse
 import gc
 import os
 from termcolor import colored
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy import interpolate
-from datetime import datetime
-import wandb
-import yaml
-from dataclasses import fields
 import logging
+
+# Local files
+from src.models.lidar_emma import LidarEMMA
+from scripts.nuscenes_dataset import NuScenesDataset
+from src.utils.lidaremma_utils import collate_fn, parse_coords_from_text
 
 
 def load_model(args, device):

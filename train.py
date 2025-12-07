@@ -1,12 +1,10 @@
 # PyTorch Files
 from pathlib import Path
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Local files
-from src.models.qwen_clip_model import QwenCLIPModel
 from src.models.lidar_emma import LidarEMMA
 from scripts.nuscenes_dataset import NuScenesDataset
 from training_configs.dataclass import TrainingArgs
@@ -15,7 +13,6 @@ from src.utils.lidaremma_utils import collate_fn
 # Other
 import argparse
 import gc
-import os
 from termcolor import colored
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -26,8 +23,6 @@ import wandb
 import yaml
 from dataclasses import fields
 import logging
-
-
 
 def load_yaml_config(path):
     with open(path, "r") as f:

@@ -1,1 +1,0 @@
-idx,num_valid_waypoints,format_compliant,ade,fde,miss_rate_10m,failure_at_1s,error_at_1s,processing_time_sec,wp0_error,wp1_error,wp2_error,wp3_error,wp4_error,wp5_error,wp6_error,wp7_error,wp8_error,wp9_error,gt_trajectory,pred_trajectory,gen_text
