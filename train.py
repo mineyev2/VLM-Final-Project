@@ -125,7 +125,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s"
     )
-
+    
     # ========================================================================
     # Parse Arguments
     # ========================================================================
@@ -477,16 +477,16 @@ def main():
     print(f"Checkpoints saved to: {output_dir}")
     print("="*70 + "\n")
     
-    # Save final checkpoint
-    final_ckpt_path = output_dir / "final_checkpoint.pth"
-    save_checkpoint(
-        model, optimizer, scheduler, args.epochs, global_step, loss_history[-1], final_ckpt_path, use_lidar=args.use_lidar
-    )
+    # # Save final checkpoint
+    # final_ckpt_path = output_dir / "final_checkpoint.pth"
+    # save_checkpoint(
+    #     model, optimizer, scheduler, args.epochs, global_step, loss_history[-1], final_ckpt_path, use_lidar=args.use_lidar
+    # )
     
-    # ========================================================================
-    # Final WandB Summary
-    # ========================================================================
-    wandb.save(str(final_ckpt_path))
+    # # ========================================================================
+    # # Final WandB Summary
+    # # ========================================================================
+    # wandb.save(str(final_ckpt_path))
     
     # Log final summary statistics
     wandb.run.summary.update({

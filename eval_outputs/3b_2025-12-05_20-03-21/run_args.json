@@ -1,0 +1,13 @@
+{
+    "ablation": "3b",
+    "checkpoint": "/home/hice1/rmineyev3/scratch/VLM-Final-Project/outputs/latest/3b_2025-12-05_20-03-21/best_checkpoint.pth",
+    "dataroot": "/storage/ice-shared/cs8803vlm/rmineyev3",
+    "version": "v1.0-test",
+    "batch_size": 100,
+    "output_name": "eval_results.csv",
+    "num_workers": 8,
+    "use_lidar": false,
+    "run_name": "3b_2025-12-05_20-03-21",
+    "llm": "Qwen/Qwen2.5-3B-Instruct",
+    "output_dir": "./eval_outputs/3b_2025-12-05_20-03-21"
+}
