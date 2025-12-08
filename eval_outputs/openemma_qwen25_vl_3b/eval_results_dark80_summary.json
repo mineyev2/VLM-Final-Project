@@ -1,0 +1,18 @@
+{
+    "category": "dark<80",
+    "total_samples": 379,
+    "successful_samples": 278,
+    "failed_samples": 101,
+    "failure_rate": 0.26649076517150394,
+    "format_compliance_rate": 1.0,
+    "ade_mean": 10.513406565700771,
+    "ade_std": 8.19578494292545,
+    "fde_mean": 19.499105711301493,
+    "fde_std": 15.089830719198243,
+    "error_at_1s_mean": 3.9298172949454093,
+    "error_at_1s_std": 2.9774005668724706,
+    "error_at_2s_mean": 7.51136177740465,
+    "error_at_2s_std": 6.081315639040994,
+    "error_at_3s_mean": 11.216515554847518,
+    "error_at_3s_std": 9.162774160121604
+}
